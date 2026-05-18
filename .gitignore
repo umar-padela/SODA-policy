@@ -216,3 +216,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# --- SODA-project ---
+data/processed/
+experiments/*
+!experiments/README.md
+data/raw/square/
+pushT_options_labeled/

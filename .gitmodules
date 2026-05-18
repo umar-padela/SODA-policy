@@ -1,0 +1,6 @@
+[submodule "third_party/diffusion_policy"]
+	path = third_party/diffusion_policy
+	url = https://github.com/real-stanford/diffusion_policy.git
+[submodule "third_party/love"]
+	path = third_party/love
+	url = https://github.com/yidingjiang/love.git
