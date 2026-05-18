@@ -1,6 +1,6 @@
 # Configs
 
-Hydra-style YAML recipes per **task** and **supervision type**. See [`project_plan.md`](../project_plan.md) §4.3.
+Hydra-style YAML recipes per **task** and **supervision type**. See [`project_plan.md`](../project_plan.md) §2 (option discovery) and §4.3 (config files).
 
 ## Naming
 

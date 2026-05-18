@@ -3,7 +3,7 @@
 Living document for implementation. Derived from [`project_proposal.md`](project_proposal.md).
 
 **Status:** Repo layout **scaffolded** (§3); implementation stubs empty.  
-**Branch:** `dev_umar`
+**Branches:** `dev_umar` / `dev_neetish` → merge to `master` ([§11](#11-git-workflow))
 
 ---
 
@@ -11,12 +11,12 @@ Living document for implementation. Derived from [`project_proposal.md`](project
 
 | Part | Sections | Use when you need… |
 |------|----------|-------------------|
-| **I — Overview** | [§1 Goal](#1-goal) · [§2 Architecture](#2-architecture) | What SODA is and how the pieces fit |
-| **II — Repository & code** | [§3 Layout](#3-repository-layout) · [§4 Code map](#4-code-map) · [§5 Data](#5-data) | Where files go and what they do |
+| **I — Overview** | [§1 Goal](#1-goal) · [§2 Architecture](#2-architecture) (incl. [option discovery](#option-discovery)) | What SODA is; how options are labeled; how the stack fits |
+| **II — Repository & code** | [§3 Layout](#3-repository-layout) · [§4 Code map](#4-code-map) · [§5 Data](#5-data) | Where files go; zarr paths and artifacts |
 | **III — Experiments & execution** | [§6 Evaluation](#6-evaluation) · [§7 Runbook](#7-execution-runbook) | Metrics, baselines, and **what to do next** |
 | **IV — Project admin** | [§8 Open decisions](#8-open-design-decisions) · [§9–11](#9-team) · [Changelog](#changelog) | TBDs, ownership, git |
 
-**Start implementing → [§7 Execution runbook](#7-execution-runbook)** (rows 1–32).
+**Start implementing → [§7 Execution runbook](#7-execution-runbook)** (rows 1–35).
 
 ---
 
@@ -26,7 +26,7 @@ Living document for implementation. Derived from [`project_proposal.md`](project
 
 Build a hierarchical imitation-learning policy where a high-level controller selects **options** and a low-level **diffusion policy** generates **variable-horizon** action chunks until a learned **termination** signal fires.
 
-Option discovery is studied in a **2×2 matrix**: **supervised** vs **unsupervised (LOVE)** × **Push-T** vs **Square**—four training regimes sharing the same hierarchical stack. **Supervised labels are task-specific:** Push-T uses **heuristic** labels (notebook + zarr in git; optional regen via notebook); Square uses **VLM** (same pattern, later).
+Option discovery is studied in a **2×2 matrix**: **supervised** vs **unsupervised (LOVE)** × **Push-T** vs **Square**—four training regimes sharing the same hierarchical stack. Labeling strategy per task is in [§2 Option discovery](#option-discovery); implementation steps are in [§7](#7-execution-runbook).
 
 Compare against vanilla Diffusion Policy under open-loop, closed-loop (`T_a=1`), and receding-horizon (`T_a=8`) control, with **matched regimes** (DP open ↔ SODA open, etc.). **Push-T** is scored by **max block–target overlap (%)** over a fixed step budget; **Square** uses the standard DP success metric.
 
@@ -67,6 +67,47 @@ flowchart TB
   Ctrl --> Regimes
 ```
 
+### Option discovery
+
+How we obtain per-timestep **`option_id`** in zarr before training. Every experiment uses the **same** DP-compatible schema (`data/option_id` + `img` / `state` / `action`); only the **labeling method** changes. The hierarchical policies below do not run VLM, heuristics, or LOVE at inference—those are **offline** only.
+
+```mermaid
+flowchart LR
+  demos["Demonstrations\nzarr or raw demos"]
+  discover["Option discovery\nsupervised or LOVE"]
+  labeled["Labeled zarr\n+ option_id"]
+  soda["SODA training\npi_high, pi_low"]
+  demos --> discover --> labeled --> soda
+```
+
+#### Supervised option discovery
+
+Assign `option_id` using an external signal about which subgoal / skill is active at each timestep.
+
+| Task | Method | Notes |
+|------|--------|--------|
+| **Push-T** | **Heuristics** | Rule-based labels from state/contact (e.g. overlap, motion phases). VLM was tried first but did **not work well** on Push-T—phases are contact-heavy and hard to segment reliably from vision alone. |
+| **Square** | **VLM** | Vision-language model labels subgoals from images (standard approach for semantic phases on visual demos). |
+
+**Notebooks and artifacts**
+
+- **Push-T:** [`data/pusht/pushT_labeling.ipynb`](data/pusht/pushT_labeling.ipynb) — production path is **heuristic** export to [`data/raw/pusht/pusht.zarr/`](data/raw/pusht/pusht.zarr/). The notebook retains structure from earlier **VLM attempts**; useful as a **starting point** (Colab flow, export to zarr, prompting patterns) when building Square labeling, even though Push-T does not use VLM labels in the final dataset.
+- **Square:** `data/square/square_labeling.ipynb` (planned) — adapt from the Push-T notebook; export to `data/raw/square/square.zarr/`.
+
+Configs: `configs/{pusht,square}/soda_supervised.yaml` → supervised zarr path ([§4.3](#43-configs-and-scripts)).
+
+#### Unsupervised option discovery (LOVE)
+
+[LOVE](https://github.com/yidingjiang/love) discovers a discrete option set and skill boundaries **without** human or VLM labels—typically by optimizing a compression / description-length objective over demonstration sequences so that skill assignments are statistically meaningful rather than hand-defined.
+
+- **Output:** cluster or skill id per timestep, written into `data/option_id` in the same zarr layout as supervised runs.
+- **Code:** `soda/option_discovery/love_adapter/` (wraps / adapts [`third_party/love`](third_party/love)).
+- **Caveat:** LOVE was developed in simpler observation settings; image-based Push-T / Square may need an **encoder adapter** and tuning (skill count, minimum segment length, filtering degenerate skills). Open choices: [§8F](#f-love-integration-open).
+
+Configs: `configs/{pusht,square}/soda_unsupervised.yaml`. Experiments **E3** (Push-T) and **E4** (Square).
+
+**Implementation steps (all methods):** [§7 Execution runbook](#7-execution-runbook) only—not duplicated here.
+
 ### Experiments (2×2 + P0)
 
 Same stack (`pi_high` + `pi_low` + termination); only **how options are labeled** changes.
@@ -80,35 +121,37 @@ Same stack (`pi_high` + `pi_low` + termination); only **how options are labeled*
 
 | ID | Discovery | Task | Owner | Status | Runbook |
 |----|-----------|------|-------|--------|---------|
-| **P0** | Eval gate (E1 vs frozen DP) | Push-T | Umar | Not started | §7 rows 23–25 |
-| **E1** | Heuristic supervised | Push-T | Umar | Zarr **complete** | §7 rows 2–25 |
-| **E2** | VLM supervised | Square | Neetish (labels), Umar (train) | Not started | §7 rows 26, 28–29 |
-| **E3** | LOVE unsupervised | Push-T | Neetish | Not started | §7 rows 27, 30 |
-| **E4** | LOVE unsupervised | Square | Neetish | Not started | §7 rows 27, 31 |
+| **P0** | Push-T eval gate: E1 vs frozen DP; E3 (LOVE) labels + train/eval soon after | Push-T | See §7 | Not started | §7 rows 23–28 |
+| **E1** | Heuristic supervised | Push-T | Umar | Zarr **complete** | §7 rows 2–22, 23–24 |
+| **E2** | VLM supervised | Square | See §7 | Not started | §7 rows 30, 32–33 |
+| **E3** | LOVE unsupervised | Push-T | See §7 | Not started | §7 rows 25–28 |
+| **E4** | LOVE unsupervised | Square | See §7 | Not started | §7 rows 31, 34 |
 
 ### Component design (locked)
 
-**Execution loop**
+#### Execution loop
 
 1. `pi_high` selects option `ω` given state `s`.
 2. `pi_low` runs until `beta_omega(s) > beta_transition`.
 3. Repeat.
 
-**`pi_high` (high-level)**
+#### Policies
+
+##### High-level policy (`pi_high`)
 
 - Discrete `pi_high(omega | s)` on segmented demos.
 - **Training:** **flow matching** only (not BC/CE) — see [§8B](#b-high-level-flow-matching) for open FM details.
-- Code: `soda/models/high_policy.py`, `soda/training/train_high.py` (pair: `train_low.py`).
+- **Code:** `soda/models/high_policy.py`, `soda/training/train_high.py` (pair: `train_low.py`).
 
-**`pi_low` (low-level)**
+##### Low-level policy (`pi_low`)
 
-- Backbone: [Diffusion Policy](https://github.com/real-stanford/diffusion_policy) 1D U-Net; extend via **subclasses in `soda/`** only ([§4.1](#41-third-party-dependencies)).
+- **Backbone:** [Diffusion Policy](https://github.com/real-stanford/diffusion_policy) 1D U-Net; extend via **subclasses in `soda/`** only ([§4.1](#41-third-party-dependencies)).
 - **Temporal stretching:** variable segment length → train at `h_max`; predict **D+1** actions (horizon channel).
 - **Horizon decode (locked):** `h_pred = mean(actions[..., -1])` → `TemporalStretcher.unstretch` ([§4.2](#42-soda-package-code-map)).
 - **Termination:** `beta = MLP(stop_grad(bottleneck))`; BCE; no grad from β into U-Net ([§8](#8-open-design-decisions)).
 - **Option conditioning (locked):** integer `option_id` → `nn.Embedding` → **concat** to global cond (not raw integer).
 - **Loss:** `L_total = L_diffusion + L_termination` (no λ for shared-encoder balancing).
-- Code: `soda/models/low_policy.py`, `soda/training/train_low.py` (pair: `train_high.py`).
+- **Code:** `soda/models/low_policy.py`, `soda/training/train_low.py` (pair: `train_high.py`).
 
 ---
 
@@ -272,7 +315,7 @@ We use the **same Zarr v2 layout** as [Diffusion Policy](https://github.com/real
 | `inference/control_regimes.py` | `run_control_regime` | Open / Ta=1 / Ta=8 |
 | `eval/metrics.py` | `EvalMetrics` | Push-T overlap %; Square success |
 | `eval/run_eval.py` | — | Rollout + logging |
-| `option_discovery/love_adapter/` | — | LOVE → zarr `option_id` (E3/E4) |
+| `option_discovery/love_adapter/` | — | Unsupervised labeling pipeline ([§2 Option discovery](#option-discovery)) |
 
 ### 4.3 `configs/` and `scripts/`
 
@@ -344,9 +387,7 @@ Example: `T=25650`, `206` episodes. Requires `zarr<3.0`.
 
 Same pattern: Colab notebook in git + labeled zarr in git; regen = run Colab → upload output zip → `data/raw/square/square.zarr/` (size TBD for whether zarr stays in git).
 
-### LOVE (E3/E4)
-
-Export cluster IDs into `option_id` in the same zarr layout via `soda/option_discovery/love_adapter/`.
+Labeling methods (heuristic, VLM, LOVE): [§2 Option discovery](#option-discovery). LOVE zarr paths and adapter work: §7 runbook.
 
 ### Git policy
 
@@ -368,12 +409,13 @@ Export cluster IDs into `option_id` in the same zarr layout via `soda/option_dis
 
 ### P0 — first gate (Push-T)
 
-| Arm | Training | Notes |
-|-----|----------|-------|
-| **Baseline** | Frozen official DP Push-T weights | No retraining |
-| **Challenger** | SODA E1 from scratch | Heuristic zarr + full stack |
+| Arm | Training | Labels |
+|-----|----------|--------|
+| **Baseline** | Frozen official DP Push-T | — |
+| **SODA E1** | From scratch | Heuristic ([§2](#option-discovery)) |
+| **SODA E3** | From scratch (soon after E1 path works) | LOVE ([§2](#option-discovery)) |
 
-Eval under DP protocol (300 steps, max overlap). **Matched regimes only** (see below).
+Eval under DP protocol (300 steps, max overlap). **Matched regimes only** (see below). Minimum: E1 vs DP; target **E3 vs DP** (and optionally E3 vs E1) once LOVE zarr exists—see §7 rows 23–28.
 
 ### Full method list
 
@@ -450,7 +492,7 @@ Work top to bottom. Experiment IDs: [§2 Experiments](#experiments-22--p0).
 | 16 | `high_policy.py` + `train_high.py` | §2, §4.2 | Umar | ☐ |
 | 17 | `hierarchical_controller.py` + `control_regimes.py` | §4.2 | Umar | ☐ |
 | 18 | `metrics.py` + `run_eval.py` | §6 | Umar | ☐ |
-| 19 | `configs/pusht/soda_supervised.yaml`, `baseline_vanilla.yaml` | §4.3 | Umar | ☐ |
+| 19 | `configs/pusht/soda_supervised.yaml`, `baseline_vanilla.yaml` | §2, §4.3 | Umar | ☐ |
 
 #### D. Train E1 (Push-T)
 
@@ -460,27 +502,30 @@ Work top to bottom. Experiment IDs: [§2 Experiments](#experiments-22--p0).
 | 21 | Train `pi_high` (flow matching) | Step 9, E1 | Umar | ☐ |
 | 22 | Sanity hierarchical rollout (one regime) | §6 | Umar | ☐ |
 
-#### E. P0 eval gate
+#### E. P0 eval gate (Push-T: E1 + E3)
 
 | # | Task | Ref | Assigned | Status |
 |---|------|-----|----------|--------|
 | 23 | Eval frozen DP vs SODA E1 (matched regimes) | P0, §6 | Umar | ☐ |
-| 24 | Log results; note saturation vs DP refs | §6 | Umar | ☐ |
-| 25 | Decide stress tests + regime priority | §8G, §6 | Umar | ☐ |
+| 24 | Log E1 vs DP; note saturation vs DP refs | §6 | Umar | ☐ |
+| 25 | LOVE: explore `third_party/love`; image encoder adapter in `love_adapter/` | §2, §8F | Neetish | ☐ |
+| 26 | LOVE: run on Push-T demos → export `option_id` zarr (separate path from E1, e.g. `pusht_love.zarr`) | §2 | Neetish | ☐ |
+| 27 | Document `num_options`; wire `configs/pusht/soda_unsupervised.yaml` | §4.3 | Neetish | ☐ |
+| 28 | Train/eval SODA E3; eval vs frozen DP (optional: E3 vs E1) | E3, §6 | Neetish | ☐ |
+| 29 | Decide stress tests + regime priority | §8G, §6 | Umar | ☐ |
 
-**P0 exit:** end-to-end train + eval works; at least one fair regime documented.
+**P0 exit:** E1 end-to-end train + eval vs DP (≥1 fair regime). E3: LOVE-labeled Push-T zarr in repo + E3 train/eval vs DP logged when ready.
 
 #### F. After P0
 
 | # | Task | Ref | Assigned | Status |
 |---|------|-----|----------|--------|
-| 26 | `square_labeling.ipynb` + `data/raw/square/square.zarr` (VLM labels) | E2 | Neetish | ☐ |
-| 27 | LOVE adapter → zarr (E3/E4) | §4.2 | Neetish | ☐ |
-| 28 | Frozen DP Square baseline | E2 | Umar | ☐ |
-| 29 | Train/eval E2 (Square, VLM supervised) | E2 | Umar | ☐ |
-| 30 | Train/eval E3 (Push-T, LOVE) | E3 | Neetish | ☐ |
-| 31 | Train/eval E4 (Square, LOVE) | E4 | Neetish | ☐ |
-| 32 | Cross-matrix comparison write-up | Step 14 | Both | ☐ |
+| 30 | `square_labeling.ipynb` + `data/raw/square/square.zarr` (VLM; fork from Push-T notebook) | E2, §2 | Neetish | ☐ |
+| 31 | LOVE: export Square zarr (E4) | §2 | Neetish | ☐ |
+| 32 | Frozen DP Square baseline | E2 | Umar | ☐ |
+| 33 | Train/eval E2 (Square, VLM supervised) | E2 | Umar | ☐ |
+| 34 | Train/eval E4 (Square, LOVE) | E4 | Neetish | ☐ |
+| 35 | Cross-matrix comparison write-up | Step 14 | Both | ☐ |
 
 ---
 
@@ -512,7 +557,12 @@ Fixed `beta_transition` + val sweep (recommended) vs calibrated threshold.
 
 ### F. LOVE integration (open)
 
-Image encoder adapter in `love_adapter` (recommended) vs low-dim LOVE vs boundaries-only.
+Concept: [§2 Option discovery](#option-discovery). Implementation: §7 rows 25–28 (Push-T), 31 (Square).
+
+| Choice | Options |
+|--------|---------|
+| Encoder | Image adapter in `love_adapter` (recommended) vs low-dim LOVE vs boundaries-only |
+| E3 zarr | Separate `pusht_love.zarr` vs copy of `pusht.zarr` with new `option_id` |
 
 ### G. Stochasticity / stress evaluation (Push-T)
 
@@ -522,10 +572,10 @@ Run P0 on standard protocol first; then noise / shorter horizon / epoch budget (
 
 ## 9. Team
 
-| Person | Scope |
-|--------|-------|
-| **Umar Padela** | E1, E2 train/eval + Square DP baseline (§7 A–E, 28–29), P0, `soda/` core |
-| **Neetish Sharma** | E2 VLM labels (row 26), LOVE E3/E4 (rows 27, 30–31) |
+| Person | Branch | Scope |
+|--------|--------|-------|
+| **Umar Padela** | `dev_umar` | E1, P0 (E1 path), `soda/` core, E2 train/eval + Square DP baseline (§7) |
+| **Neetish Sharma** | `dev_neetish` | E2 VLM labels, LOVE E3/E4 (§7) |
 
 ---
 
@@ -545,8 +595,32 @@ Run P0 on standard protocol first; then noise / shorter horizon / epoch budget (
 
 ## 11. Git workflow
 
-- Branch: **`dev_umar`**
-- **Commit:** Push-T zarr (~19 MB), labeling notebooks, code/configs
+### Branches
+
+| Branch | Primary use |
+|--------|----------------|
+| **`master`** | Stable shared baseline; merge when a milestone is ready |
+| **`dev_umar`** | Umar day-to-day (E1, P0 E1 path, `soda/` core, E2 train/eval) |
+| **`dev_neetish`** | Neetish day-to-day (E2 VLM labels, LOVE E3/E4 labeling + train) |
+
+Work on **personal dev branches**, open PRs (or merge locally) into **`master`**. Pull `master` into your dev branch before large merges to avoid drift.
+
+```bash
+# Clone (includes submodules)
+git clone --recurse-submodules <repo-url>
+cd SODA-policy
+
+# Umar
+git checkout dev_umar
+
+# Neetish
+git checkout dev_neetish
+# create once if missing: git checkout -b dev_neetish origin/master
+```
+
+### Commits
+
+- **Commit:** Push-T zarr (~19 MB), labeling notebooks, code/configs, `.gitmodules`
 - **Do not commit:** `experiments/`, checkpoints, large Square zarr (until sized)
 
 ---
@@ -569,3 +643,7 @@ Run P0 on standard protocol first; then noise / shorter horizon / epoch budget (
 | 2026-05-17 | §7 runbook: **Assigned** column (Umar / Neetish / Both); split rows 29–31 |
 | 2026-05-17 | E3 train/eval assigned to Neetish (LOVE end-to-end) |
 | 2026-05-17 | E2: Neetish labels (row 26); Umar train/eval + Square baseline (rows 28–29) |
+| 2026-05-17 | Option discovery (conceptual); P0 includes E3 LOVE; implementation in §7 only |
+| 2026-05-17 | Move option discovery from §4.3 → §2 (Architecture); §4.4 configs → §4.3 |
+| 2026-05-17 | §2 Component design: Execution loop + Policies (high / low subsections) |
+| 2026-05-17 | §11: branches `dev_umar`, `dev_neetish`, merge target `master` |
