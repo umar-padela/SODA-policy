@@ -4,6 +4,8 @@ Python implementation of **SODA** (Supervised Option Discovery for Dynamic Actio
 
 Full file tree and design: [`project_plan.md`](../project_plan.md) §3–§4.
 
+Option labeling (offline): [`option_discovery/README.md`](option_discovery/README.md).
+
 ## Modules
 
 | Folder | Role |
@@ -13,7 +15,9 @@ Full file tree and design: [`project_plan.md`](../project_plan.md) §3–§4.
 | `training/` | `train_low.py`, `train_high.py`, `losses.py` |
 | `inference/` | `HierarchicalController`, control regimes (open / closed / receding) |
 | `eval/` | Metrics and eval driver |
-| `option_discovery/love_adapter/` | LOVE → zarr `option_id` (E3/E4) |
+| `option_discovery/supervised/pusht/` | Push-T heuristic → `option_id_supervised` |
+| `option_discovery/supervised/square/` | Square VLM placeholder (E2) |
+| `option_discovery/unsupervised/love_adapter/` | LOVE → `option_id_unsupervised` (E3/E4) |
 
 ## Training (not implemented yet)
 

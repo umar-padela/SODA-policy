@@ -8,8 +8,8 @@ Same two filenames under each task folder; the folder picks dataset path and lab
 
 | Config | `pusht/` | `square/` |
 |--------|----------|-----------|
-| `soda_supervised.yaml` | E1 — heuristic `option_id` | E2 — VLM `option_id` |
-| `soda_unsupervised.yaml` | E3 — LOVE `option_id` | E4 — LOVE `option_id` |
+| `soda_supervised.yaml` | E1 — `option_id_supervised` (heuristic) | E2 — `option_id_supervised` (VLM) |
+| `soda_unsupervised.yaml` | E3 — `option_id_unsupervised` (LOVE) | E4 — `option_id_unsupervised` (LOVE) |
 | `baseline_vanilla.yaml` | Frozen Diffusion Policy baseline | Frozen DP baseline |
 
 ## Example

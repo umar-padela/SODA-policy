@@ -3,7 +3,7 @@
 | Script | Purpose |
 |--------|---------|
 | `setup_submodules.sh` | Init `third_party/diffusion_policy` and `third_party/love` |
-| `download_data.sh` | Download Square data (Push-T zarr lives in `data/raw/pusht/`) |
+| `download_data.sh` | Download Square data (Push-T zarr in `data/raw/pusht/`; regen labels via `soda/option_discovery/`) |
 | `train_soda.sh` | Train SODA: `task=pusht\|square` `discovery=supervised\|unsupervised` |
 | `eval_soda.sh` | Evaluation driver |
 

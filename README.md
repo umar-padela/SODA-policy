@@ -10,13 +10,14 @@ Hierarchical imitation learning: a high-level policy selects **options**; a low-
 |-----|----------|
 | [`project_plan.md`](project_plan.md) | **Main reference** — architecture, full repo tree, data policy, configs, execution runbook (§7) |
 | [`project_proposal.md`](project_proposal.md) | Project proposal |
-| Per-folder `README.md` | Short notes under `data/`, `soda/`, `configs/`, `scripts/`, `experiments/` |
+| Per-folder `README.md` | Short notes under `data/`, `soda/`, `soda/option_discovery/`, `configs/`, `scripts/`, `modal/`, `experiments/` |
 
 ## Repo layout (quick)
 
 | Path | What |
 |------|------|
-| [`data/`](data/README.md) | Zarr datasets and labeling notebooks |
+| [`data/`](data/README.md) | Zarr datasets on disk |
+| [`soda/option_discovery/`](soda/option_discovery/README.md) | Offline labeling (Push-T heuristic, LOVE, Square TBD) |
 | [`data/raw/pusht/pusht.zarr/`](data/raw/pusht/pusht.zarr/) | Push-T training data (committed) |
 | [`soda/`](soda/README.md) | Training and inference code |
 | [`configs/`](configs/README.md) | Experiment YAML (`soda_supervised`, `soda_unsupervised`, baselines) |
@@ -63,11 +64,26 @@ data/raw/pusht/pusht.zarr/
 
 No download or manual copy step is required for training on Push-T.
 
-To **regenerate** labels (optional): see [`data/README.md`](data/README.md) — run `data/pusht/pushT_labeling.ipynb` in Colab, then upload the output zip to `data/raw/pusht/`.
+To **regenerate** Push-T supervised labels (optional): `python -m soda.option_discovery.supervised.pusht.build_zarr` — see [`soda/option_discovery/README.md`](soda/option_discovery/README.md).
 
 ### 3. Environment
 
-Conda / dependencies: see [`project_plan.md` §7 row 5](project_plan.md) and `environment.yml` (when populated). Diffusion Policy’s upstream install notes apply for the `third_party/diffusion_policy` submodule.
+**Training runs on [Modal](https://modal.com/)** (GPU containers), not on your laptop. See [`project_plan.md` §3 Compute](project_plan.md).
+
+| File | Use |
+|------|-----|
+| [`environment.yml`](environment.yml) | **Local conda env** — Modal, W&B, labeling tools (`zarr`, `opencv`, …) |
+| [`environment.modal.yml`](environment.modal.yml) | Pin reference for Modal GPU image only (full DP stack) |
+| `modal/modal_config.py` | Remote image + Volume for checkpoints |
+
+```bash
+conda env create -f environment.yml
+conda activate soda
+modal run modal/modal_smoke.py          # infrastructure smoke test
+# modal run modal/modal_train_low.py ...   (when train_low.py is implemented)
+```
+
+See [`project_plan.md` §7 row 5](project_plan.md).
 
 ### 4. Development
 
@@ -80,4 +96,4 @@ Implementation status and next steps: [`project_plan.md` §7 Execution runbook](
 
 ## Submodule pins
 
-Submodule commits are fixed in the parent repo (see `git submodule status`). To bump a dependency, check out a new SHA inside the submodule, then commit the updated gitlink from the repo root — see [`project_plan.md` §7 row 8](project_plan.md).
+Submodule commits are fixed in the parent repo (see `git submodule status`). To bump a dependency, check out a new SHA inside the submodule, then commit the updated gitlink from the repo root — see [`project_plan.md` §7 row 7](project_plan.md).

@@ -16,7 +16,7 @@ Living document for implementation. Derived from [`project_proposal.md`](project
 | **III — Experiments & execution** | [§6 Evaluation](#6-evaluation) · [§7 Runbook](#7-execution-runbook) | Metrics, baselines, and **what to do next** |
 | **IV — Project admin** | [§8 Open decisions](#8-open-design-decisions) · [§9–11](#9-team) · [Changelog](#changelog) | TBDs, ownership, git |
 
-**Start implementing → [§7 Execution runbook](#7-execution-runbook)** (rows 1–35).
+**Start implementing → [§7 Execution runbook](#7-execution-runbook)** (rows 1–34).
 
 ---
 
@@ -69,42 +69,59 @@ flowchart TB
 
 ### Option discovery
 
-How we obtain per-timestep **`option_id`** in zarr before training. Every experiment uses the **same** DP-compatible schema (`data/option_id` + `img` / `state` / `action`); only the **labeling method** changes. The hierarchical policies below do not run VLM, heuristics, or LOVE at inference—those are **offline** only.
+How we obtain per-timestep option labels before SODA training. **One Zarr store per task** (e.g. `data/raw/pusht/pusht.zarr/`, `data/raw/square/square.zarr/`) holds demonstrations plus **multiple label arrays**—we do not duplicate `img` / `state` / `action` for supervised vs unsupervised runs.
+
+| Zarr array | Source | Configs |
+|------------|--------|---------|
+| `data/option_id_supervised` | Heuristic (Push-T) or VLM (Square) | `soda_supervised.yaml` (`option_id_key`) |
+| `data/option_id_unsupervised` | LOVE (fits on demos, writes labels into same zarr) | `soda_unsupervised.yaml` (`option_id_key`) |
+
+Base layout matches [Diffusion Policy](https://github.com/real-stanford/diffusion_policy) Zarr v2 (`data/img`, `state`, `action`, `meta/episode_ends`). The hierarchical policies do not run VLM, heuristics, or LOVE at inference—those are **offline** only.
 
 ```mermaid
 flowchart LR
-  demos["Demonstrations\nzarr or raw demos"]
-  discover["Option discovery\nsupervised or LOVE"]
-  labeled["Labeled zarr\n+ option_id"]
+  zarr["Task zarr\ndemos + label arrays"]
+  sup["Supervised labeling\nheuristic or VLM"]
+  love["LOVE\ntrain on demos"]
   soda["SODA training\npi_high, pi_low"]
-  demos --> discover --> labeled --> soda
+  zarr --> sup
+  sup -->|writes option_id_supervised| zarr
+  zarr --> love
+  love -->|writes option_id_unsupervised| zarr
+  zarr --> soda
 ```
 
 #### Supervised option discovery
 
-Assign `option_id` using an external signal about which subgoal / skill is active at each timestep.
+Assign per-timestep skill ids using an external signal about which subgoal / skill is active. Export writes **`data/option_id_supervised`** into the task zarr.
 
 | Task | Method | Notes |
 |------|--------|--------|
 | **Push-T** | **Heuristics** | Rule-based labels from state/contact (e.g. overlap, motion phases). VLM was tried first but did **not work well** on Push-T—phases are contact-heavy and hard to segment reliably from vision alone. |
 | **Square** | **VLM** | Vision-language model labels subgoals from images (standard approach for semantic phases on visual demos). |
 
-**Notebooks and artifacts**
+**Scripts and artifacts** (see [`soda/option_discovery/README.md`](soda/option_discovery/README.md))
 
-- **Push-T:** [`data/pusht/pushT_labeling.ipynb`](data/pusht/pushT_labeling.ipynb) — production path is **heuristic** export to [`data/raw/pusht/pusht.zarr/`](data/raw/pusht/pusht.zarr/). The notebook retains structure from earlier **VLM attempts**; useful as a **starting point** (Colab flow, export to zarr, prompting patterns) when building Square labeling, even though Push-T does not use VLM labels in the final dataset.
-- **Square:** `data/square/square_labeling.ipynb` (planned) — adapt from the Push-T notebook; export to `data/raw/square/square.zarr/`.
+| Task | Path | Output |
+|------|------|--------|
+| **Push-T** | [`build_zarr.py`](soda/option_discovery/supervised/pusht/build_zarr.py), [`visualize_labels.py`](soda/option_discovery/supervised/pusht/visualize_labels.py), [`heuristics.py`](soda/option_discovery/supervised/pusht/heuristics.py) | `option_id_supervised` in [`data/raw/pusht/pusht.zarr/`](data/raw/pusht/pusht.zarr/) |
+| **Square** | [`supervised/square/`](soda/option_discovery/supervised/square/) (placeholder) | Future VLM → `data/raw/square/square.zarr/` |
 
-Configs: `configs/{pusht,square}/soda_supervised.yaml` → supervised zarr path ([§4.3](#43-configs-and-scripts)).
+Push-T: optional [Colab](https://colab.research.google.com/github/umar-padela/SODA-policy/blob/dev_umar/data/pusht/pushT_labeling.ipynb) for visualization / threshold checks only (not in repo).
+
+Configs: `configs/{pusht,square}/soda_supervised.yaml` → same zarr path, `option_id_key: option_id_supervised` ([§4.3](#43-configs-and-scripts)).
 
 #### Unsupervised option discovery (LOVE)
 
 [LOVE](https://github.com/yidingjiang/love) discovers a discrete option set and skill boundaries **without** human or VLM labels—typically by optimizing a compression / description-length objective over demonstration sequences so that skill assignments are statistically meaningful rather than hand-defined.
 
-- **Output:** cluster or skill id per timestep, written into `data/option_id` in the same zarr layout as supervised runs.
-- **Code:** `soda/option_discovery/love_adapter/` (wraps / adapts [`third_party/love`](third_party/love)).
-- **Caveat:** LOVE was developed in simpler observation settings; image-based Push-T / Square may need an **encoder adapter** and tuning (skill count, minimum segment length, filtering degenerate skills). Open choices: [§8F](#f-love-integration-open).
+- **Input:** reads demonstration arrays (`img`, `state`, `action`) from the task zarr; does **not** use `option_id_supervised`.
+- **Training:** LOVE fits its discovery objective on those trajectories (offline, before SODA).
+- **Output:** per-timestep cluster / skill id written into **`data/option_id_unsupervised`** in the **same** zarr (no second dataset copy).
+- **Code:** `soda/option_discovery/unsupervised/love_adapter/` (wraps / adapts [`third_party/love`](third_party/love)).
+- **Caveat:** LOVE was developed in simpler observation settings; image-based Push-T / Square may need an **encoder adapter** and tuning (skill count, minimum segment length, filtering degenerate skills). Remaining open choices: [§8F](#f-love-integration-open).
 
-Configs: `configs/{pusht,square}/soda_unsupervised.yaml`. Experiments **E3** (Push-T) and **E4** (Square).
+Configs: `configs/{pusht,square}/soda_unsupervised.yaml` → same zarr path, `option_id_key: option_id_unsupervised`. Experiments **E3** (Push-T) and **E4** (Square).
 
 **Implementation steps (all methods):** [§7 Execution runbook](#7-execution-runbook) only—not duplicated here.
 
@@ -114,18 +131,18 @@ Same stack (`pi_high` + `pi_low` + termination); only **how options are labeled*
 
 | | **Push-T** | **Square** |
 |--|------------|------------|
-| **Supervised** | Heuristic (Colab) | VLM (Colab) |
-| **Unsupervised (LOVE)** | LOVE → zarr `option_id` | LOVE → zarr `option_id` |
+| **Supervised** | Heuristic (`supervised/pusht/build_zarr`) | VLM (`supervised/square/`, TBD) |
+| **Unsupervised (LOVE)** | LOVE → `option_id_unsupervised` | LOVE → `option_id_unsupervised` |
 
 **Comparisons we care about:** supervision type (supervised vs LOVE); task (Push-T vs Square); vs frozen vanilla DP per regime.
 
 | ID | Discovery | Task | Owner | Status | Runbook |
 |----|-----------|------|-------|--------|---------|
-| **P0** | Push-T eval gate: E1 vs frozen DP; E3 (LOVE) labels + train/eval soon after | Push-T | See §7 | Not started | §7 rows 23–28 |
-| **E1** | Heuristic supervised | Push-T | Umar | Zarr **complete** | §7 rows 2–22, 23–24 |
-| **E2** | VLM supervised | Square | See §7 | Not started | §7 rows 30, 32–33 |
-| **E3** | LOVE unsupervised | Push-T | See §7 | Not started | §7 rows 25–28 |
-| **E4** | LOVE unsupervised | Square | See §7 | Not started | §7 rows 31, 34 |
+| **P0** | Push-T eval gate: E1 vs frozen DP; E3 (LOVE) labels + train/eval soon after | Push-T | See §7 | Not started | §7 rows 22–27 |
+| **E1** | Heuristic supervised | Push-T | Umar | Zarr **complete** | §7 rows 2–21, 22–23 |
+| **E2** | VLM supervised | Square | See §7 | Not started | §7 rows 29, 31–32 |
+| **E3** | LOVE unsupervised | Push-T | See §7 | Not started | §7 rows 24–27 |
+| **E4** | LOVE unsupervised | Square | See §7 | Not started | §7 rows 30, 33 |
 
 ### Component design (locked)
 
@@ -149,7 +166,7 @@ Same stack (`pi_high` + `pi_low` + termination); only **how options are labeled*
 - **Temporal stretching:** variable segment length → train at `h_max`; predict **D+1** actions (horizon channel).
 - **Horizon decode (locked):** `h_pred = mean(actions[..., -1])` → `TemporalStretcher.unstretch` ([§4.2](#42-soda-package-code-map)).
 - **Termination:** `beta = MLP(stop_grad(bottleneck))`; BCE; no grad from β into U-Net ([§8](#8-open-design-decisions)).
-- **Option conditioning (locked):** integer `option_id` → `nn.Embedding` → **concat** to global cond (not raw integer).
+- **Option conditioning (locked):** integer ω from configured zarr column (`option_id_supervised` or `option_id_unsupervised`) → `nn.Embedding` → **concat** to global cond (not raw integer).
 - **Loss:** `L_total = L_diffusion + L_termination` (no λ for shared-encoder balancing).
 - **Code:** `soda/models/low_policy.py`, `soda/training/train_low.py` (pair: `train_high.py`).
 
@@ -159,14 +176,15 @@ Same stack (`pi_high` + `pi_low` + termination); only **how options are labeled*
 
 ## 3. Repository layout
 
-> **Not created yet.** Full target tree (every planned file). Role of each path → [§4](#4-code-map).
+> **Target tree** (stubs in place for most paths; implementation in §7). Role of each path → [§4](#4-code-map).
 
 ```
 SODA-policy/
 ├── project_proposal.md
 ├── project_plan.md
 ├── README.md
-├── environment.yml
+├── environment.yml                     # local conda env: modal + labeling tools (conda activate soda)
+├── environment.modal.yml               # Modal GPU image pin reference (full DP stack; do not use locally on Windows)
 ├── .gitignore
 │
 ├── third_party/                          # §4.1 — git submodules (pinned commits)
@@ -177,7 +195,7 @@ SODA-policy/
 │   ├── README.md                         #   package overview → project_plan §3
 │   ├── dataset/                          #   PyTorch loaders (NOT zarr files — see root data/)
 │   │   ├── temporal_stretch.py           #   TemporalStretcher.stretch / .unstretch
-│   │   └── option_aware_dataset.py       #   OptionLabeledZarrDataset, derive_beta_labels
+│   │   └── option_aware_dataset.py       #   derive_beta_labels ✓; OptionLabeledZarrDataset (§7 row 11)
 │   ├── models/
 │   │   ├── low_policy.py                 #   LowPolicy (subclasses DP DiffusionUnetImagePolicy)
 │   │   ├── high_policy.py                #   HighPolicy (flow matching π_high)
@@ -193,32 +211,45 @@ SODA-policy/
 │   │   ├── metrics.py                    #   Push-T overlap %; Square success
 │   │   └── run_eval.py
 │   └── option_discovery/
-│       └── love_adapter/                 #   LOVE → zarr option_id (E3/E4)
+│       ├── README.md                     #   regen commands; Colab links
+│       ├── supervised/
+│       │   ├── pusht/                    #   build_zarr.py, visualize_labels.py, heuristics.py
+│       │   └── square/                   #   placeholder (E2 VLM)
+│       └── unsupervised/
+│           └── love_adapter/             #   LOVE → option_id_unsupervised (E3/E4)
 │
 ├── configs/
 │   ├── README.md                         #   supervised vs unsupervised naming
 │   ├── pusht/
-│   │   ├── soda_supervised.yaml          #   E1 (heuristic option_id)
-│   │   ├── soda_unsupervised.yaml        #   E3 (LOVE option_id)
+│   │   ├── soda_supervised.yaml          #   E1 (option_id_supervised)
+│   │   ├── soda_unsupervised.yaml        #   E3 (option_id_unsupervised)
 │   │   └── baseline_vanilla.yaml         #   frozen DP baseline
 │   └── square/
-│       ├── soda_supervised.yaml          #   E2 (VLM option_id)
-│       ├── soda_unsupervised.yaml        #   E4 (LOVE option_id)
+│       ├── soda_supervised.yaml          #   E2 (option_id_supervised)
+│       ├── soda_unsupervised.yaml        #   E4 (option_id_unsupervised)
 │       └── baseline_vanilla.yaml
 │
 ├── scripts/
-│   ├── README.md                         #   how to run train/eval scripts
+│   ├── README.md                         #   setup helpers; prefer modal/ for train/eval
 │   ├── setup_submodules.sh
 │   ├── download_data.sh                  #   Square only (Push-T zarr in git)
-│   ├── train_soda.sh                     #   task=pusht|square discovery=supervised|unsupervised
+│   ├── train_soda.sh                     #   optional local wrapper; primary path = modal/
 │   └── eval_soda.sh
 │
-├── data/                                 # §5 — dataset FILES on disk (zarr, notebooks)
+├── tests/                                #   pytest (e.g. derive_beta_labels); see tests/README.md
+│   ├── conftest.py
+│   └── test_derive_beta_labels.py
+│
+├── modal/                                # §3 Compute — training/eval on Modal GPUs (not local)
+│   ├── README.md                         #   modal run commands, secrets, volume layout
+│   ├── modal_config.py                   #   App, Image (DP stack), Volume, smoke/train/eval @function
+│   ├── modal_smoke.py                    #   local entrypoint → infrastructure smoke test (row 5)
+│   ├── modal_train_low.py                #   local entrypoint → train π_low on GPU container
+│   ├── modal_train_high.py             #   local entrypoint → train π_high
+│   └── modal_eval.py                     #   local entrypoint → rollout + metrics (P0 gate)
+│
+├── data/                                 # §5 — zarr stores on disk (no labeling notebooks)
 │   ├── README.md
-│   ├── pusht/
-│   │   └── pushT_labeling.ipynb          #   Colab regen: run all → upload zip
-│   ├── square/
-│   │   └── square_labeling.ipynb
 │   ├── raw/
 │   │   ├── pusht/
 │   │   │   └── pusht.zarr/               #   ~19 MB, in git
@@ -226,16 +257,51 @@ SODA-policy/
 │   │   │       │   ├── img/
 │   │   │       │   ├── state/
 │   │   │       │   ├── action/
-│   │   │       │   └── option_id/
+│   │   │       │   ├── option_id_supervised/   # E1/E2
+│   │   │       │   └── option_id_unsupervised/ # E3/E4 (added by LOVE)
 │   │   │       └── meta/
 │   │   │           └── episode_ends
 │   │   └── square/
 │   │       └── square.zarr/              #   TBD: in git if small enough
-│   └── processed/                        #   gitignored caches (e.g. beta_label)
+│   └── processed/                        #   gitignored (pusht_cache zip, beta_label caches)
 │
-└── experiments/                          #   outputs gitignored except README (see §5 git policy)
+└── experiments/                          #   local mirror optional; canonical checkpoints on Modal Volume
     └── README.md
 ```
+
+### Compute (Modal) — training not local
+
+**Locked:** GPU training and eval run on [Modal](https://modal.com/), following the same patterns as course assignments (`assignment2/hw2/modal_*.py`, `assignment3/hw3/modal_config.py`). Laptops only launch jobs and edit code; they do not need the full DP conda stack.
+
+| Layer | Where | Role |
+|-------|--------|------|
+| **Local machine** | `environment.yml` → `conda activate soda` | `modal`, `wandb`, Push-T labeling scripts; `modal run modal/...` from repo root |
+| **Modal container** | `modal/modal_config.py` → `modal.Image` | Linux + CUDA + mujoco apt deps + pins in `environment.modal.yml` / DP |
+| **Code sync** | `.add_local_dir(...)` on repo | Mount `soda/`, `configs/`, `third_party/` (submodules must exist locally before build) |
+| **Input data** | `data/raw/pusht/pusht.zarr/` in git | Baked into image via `add_local_dir` (small enough) or mounted path inside container |
+| **Outputs** | Modal Volume `soda-experiments` | Checkpoints, logs, eval artifacts at e.g. `/experiments` in container; `volume.commit()` after each job |
+| **Secrets** | `modal secret create wandb ...` | Same as assignments; attach in `@app.function(secrets=...)` |
+
+**Flow (hw3-style):**
+
+1. Developer runs locally: `modal run modal/modal_smoke.py` (smoke) or `modal run modal/modal_train_low.py` (train).
+2. `modal_config.train.remote(...)` starts a GPU container with the prebuilt image.
+3. Container `subprocess` or direct import runs `soda/training/train_low.py` with Hydra config under `configs/`.
+4. Writes go to the mounted Volume; local `experiments/` stays gitignored (optional copy/download).
+
+**hw2 vs hw3 patterns we reuse:**
+
+| Pattern | Assignment | SODA use |
+|---------|------------|----------|
+| Shared `modal_config.py` | hw3 | One image + volume + `train`/`eval` functions |
+| `modal_train.py` entrypoint only | hw3 | Separate entrypoints per stage (`modal_train_low`, `modal_train_high`, `modal_eval`) |
+| Minimal local conda | hw2 `conda_env_modal.yml` | `environment.yml` (one env: modal + data tools) |
+| Full stack in `modal.Image` | hw2/hw3 | DP 1.12 + zarr 2.x + mujoco; pins in `environment.modal.yml` |
+| `add_local_dir` last; ignore heavy output dirs | hw3 ignores `data/` for volume | Ignore `experiments/`, `assignment*/`; include committed zarr |
+| Hydra output dir patch | hw2 | Point `hydra.run.dir` to Volume path before training |
+| Parallel seeds | hw3 `modal_train_para.py` | Optional later for multi-seed P0 |
+
+**Not in repo layout:** `assignment1/`, `assignment2/`, `assignment3/` are reference only (not part of SODA deliverables).
 
 ### Folder READMEs (yes at top level, no in every subfolder)
 
@@ -244,11 +310,13 @@ Short `README.md` in **major** directories so newcomers know purpose + commands 
 | README | Contents (keep brief) |
 |--------|------------------------|
 | `README.md` (repo root) | Project one-liner, setup, link to `project_plan.md` |
-| `data/README.md` | Root `data/` vs `soda/dataset/`; zarr paths; git policy; Colab regen steps |
+| `data/README.md` | Root `data/` vs `soda/dataset/`; zarr paths; git policy; regen via `build_zarr` |
 | `soda/README.md` | Package map (π_low / π_high / inference); pointer to §3 tree |
+| `soda/option_discovery/README.md` | Supervised vs unsupervised pipelines; `python -m ...build_zarr` |
 | `configs/README.md` | `soda_supervised` / `soda_unsupervised` × `pusht` / `square`; example Hydra command |
-| `scripts/README.md` | `setup_submodules`, `train_soda.sh`, `eval_soda.sh` usage |
-| `experiments/README.md` | Naming convention for runs; gitignored; where checkpoints/logs go |
+| `scripts/README.md` | `setup_submodules`, optional local wrappers |
+| `modal/README.md` | `modal run` examples, GPU type, Volume name, wandb secret |
+| `experiments/README.md` | Naming convention; primary storage = Modal Volume `soda-experiments` |
 
 **Skip:** `third_party/` (submodule docs live upstream), nested `soda/*/` READMEs.
 
@@ -286,25 +354,26 @@ Short `README.md` in **major** directories so newcomers know purpose + commands 
 
 | Path | What it is |
 |------|------------|
-| **`data/`** (repo root) | **Files on disk** — zarr stores, labeling notebooks, caches |
+| **`data/`** (repo root) | **Files on disk** — zarr stores, gitignored caches (`processed/`) |
+| **`soda/option_discovery/`** | **Labeling code** — supervised per-task scripts; unsupervised LOVE adapter |
 | **`soda/dataset/`** | **Loader code** — PyTorch `Dataset` classes that read root `data/` |
 
 #### `soda/dataset/` — loaders (extends Columbia Diffusion Policy)
 
-We use the **same Zarr v2 layout** as [Diffusion Policy](https://github.com/real-stanford/diffusion_policy) (`data/img`, `state`, `action`, `meta/episode_ends`) so frozen DP checkpoints and env runners stay compatible. SODA adds **`data/option_id`** and training-time logic DP does not have.
+We use the **same Zarr v2 layout** as [Diffusion Policy](https://github.com/real-stanford/diffusion_policy) (`data/img`, `state`, `action`, `meta/episode_ends`) so frozen DP checkpoints and env runners stay compatible. SODA adds **option label arrays** (`option_id_supervised`, `option_id_unsupervised`) and training-time logic DP does not have.
 
 | Reuse from DP (`third_party/diffusion_policy/dataset/`) | SODA-specific (in `soda/dataset/`) |
 |--------------------------------------------------------|-----------------------------------|
-| Zarr reading, episode indexing, image obs normalization patterns (`pusht_image_dataset.py`, `square_*`) | Read `option_id`; segment demos by option boundaries |
+| Zarr reading, episode indexing, image obs normalization patterns (`pusht_image_dataset.py`, `square_*`) | Read `option_id_key` from config; segment demos by option boundaries |
 | Sequence sampling / windowing ideas | `TemporalStretcher` — variable-horizon stretch to `h_max` |
-| — | `derive_beta_labels` from `option_id` transitions for termination BCE |
+| — | `derive_beta_labels` from selected option column (last frame per segment; §7 row 6 ☑) |
 
 **Implementation approach:** subclass or wrap DP’s image dataset where possible; only fork logic that must change (option segments, stretch, β labels). Do not duplicate the whole loader if upstream helpers suffice.
 
 | Path (see §3 tree) | Key symbols | Role |
 |------|-------------|------|
 | `dataset/temporal_stretch.py` | `TemporalStretcher.stretch`, `.unstretch` | Resample segments; mean-pool horizon decode |
-| `dataset/option_aware_dataset.py` | `OptionLabeledZarrDataset`, `derive_beta_labels` | Load root `data/raw/.../*.zarr`; DP-compatible + SODA fields |
+| `dataset/option_aware_dataset.py` | `derive_beta_labels` ☑; `OptionLabeledZarrDataset` (row 11) | Load root `data/raw/.../*.zarr`; DP-compatible + SODA fields |
 | `models/low_policy.py` | `LowPolicy` | Subclasses DP `DiffusionUnetImagePolicy`; embed(ω) + D+1 + β hook |
 | `models/high_policy.py` | `HighPolicy` | Flow-matching `pi_high` |
 | `models/termination_head.py` | `TerminationHead` | `MLP(stop_grad(bottleneck))` |
@@ -315,7 +384,21 @@ We use the **same Zarr v2 layout** as [Diffusion Policy](https://github.com/real
 | `inference/control_regimes.py` | `run_control_regime` | Open / Ta=1 / Ta=8 |
 | `eval/metrics.py` | `EvalMetrics` | Push-T overlap %; Square success |
 | `eval/run_eval.py` | — | Rollout + logging |
-| `option_discovery/love_adapter/` | — | Unsupervised labeling pipeline ([§2 Option discovery](#option-discovery)) |
+| `option_discovery/supervised/pusht/` | `build_zarr`, `visualize_labels`, `heuristics` | Push-T heuristic → `option_id_supervised` |
+| `option_discovery/supervised/square/` | — (placeholder) | E2 VLM → `option_id_supervised` (TBD) |
+| `option_discovery/unsupervised/love_adapter/` | — | LOVE → `option_id_unsupervised` ([§2](#option-discovery)) |
+
+#### `modal/` — remote train/eval (Modal)
+
+| File | Role |
+|------|------|
+| `modal_config.py` | `modal.App`, `modal.Image` (DP-compatible deps), `modal.Volume`, `smoke`, `train_low`, `train_high` |
+| `modal_smoke.py` | `@app.local_entrypoint` → `smoke.remote()` (GPU + zarr + W&B check) |
+| `modal_train_low.py` | → `train_low.remote(...)` |
+| `modal_train_high.py` | → `train_high.remote(...)` |
+| `modal_eval.py` | → eval + metrics; writes to Volume for P0 comparison |
+
+Image recipe should mirror pins in `environment.modal.yml` (PyTorch 1.12, `zarr<3`, mujoco/robosuite). Submodule `third_party/diffusion_policy` must be present when the image is built.
 
 ### 4.3 `configs/` and `scripts/`
 
@@ -323,21 +406,23 @@ We use the **same Zarr v2 layout** as [Diffusion Policy](https://github.com/real
 
 | Config | Push-T (`configs/pusht/`) | Square (`configs/square/`) |
 |--------|---------------------------|----------------------------|
-| `soda_supervised.yaml` | E1 — heuristic `option_id` | E2 — VLM `option_id` |
-| `soda_unsupervised.yaml` | E3 — LOVE `option_id` | E4 — LOVE `option_id` |
+| `soda_supervised.yaml` | E1 — `option_id_supervised` (heuristic) | E2 — `option_id_supervised` (VLM) |
+| `soda_unsupervised.yaml` | E3 — `option_id_unsupervised` (LOVE) | E4 — `option_id_unsupervised` (LOVE) |
 | `baseline_vanilla.yaml` | Frozen DP baseline | Frozen DP baseline |
 
-Example: `python soda/training/train_low.py --config-path configs/pusht --config-name soda_supervised`
+Example (on Modal): `modal run modal/modal_smoke.py` · `modal run modal/modal_train_low.py --config-name soda_supervised`  
+Local debug (optional): `python soda/training/train_low.py --config-path configs/pusht --config-name soda_supervised`
 
 | Path (see §3 tree) | Role |
 |------|------|
 | `configs/{pusht,square}/soda_supervised.yaml` | Supervised option discovery |
-| `configs/{pusht,square}/soda_unsupervised.yaml` | Unsupervised (LOVE → `option_id`) |
+| `configs/{pusht,square}/soda_unsupervised.yaml` | Unsupervised (`option_id_key: option_id_unsupervised`) |
 | `configs/{pusht,square}/baseline_vanilla.yaml` | Frozen DP baseline |
 | `scripts/setup_submodules.sh` | Init submodules |
 | `scripts/download_data.sh` | Square data only (Push-T = committed zarr) |
-| `scripts/train_soda.sh` | `task=pusht\|square` + `discovery=supervised\|unsupervised` |
-| `scripts/eval_soda.sh` | Eval driver |
+| `modal/modal_config.py` | Remote image + train/eval functions ([§3 Compute](#compute-modal--training-not-local)) |
+| `scripts/train_soda.sh` | Optional thin wrapper; not primary |
+| `scripts/eval_soda.sh` | Optional local wrapper |
 
 **Doc hygiene:** when a design choice is locked, document it in [§2](#2-architecture) and implement under [§4](#4-code-map); remove from [§8](#8-open-design-decisions).
 
@@ -345,33 +430,54 @@ Example: `python soda/training/train_low.py --config-path configs/pusht --config
 
 ## 5. Data (files on disk)
 
-> **Not** `soda/dataset/` (that is loader **code** — see [§4.2](#soda-dataset--loaders-extends-columbia-diffusion-policy)). This section is only **where zarr and notebooks live** under repo-root `data/`.
+> **Not** `soda/dataset/` (loader **code**) or `soda/option_discovery/` (labeling **code** — see [§4.2](#42-soda-package-code-map)). This section is only **committed zarr stores** under repo-root `data/raw/`.
 
-No JSON label files. Training data = **DP-format Zarr v2** + per-frame `data/option_id` (extra array vs vanilla DP).
+No JSON label files. Training data = **DP-format Zarr v2** + per-frame option label arrays (extra vs vanilla DP).
 
-**Source-of-truth model (Push-T; same pattern for Square later):**
+### One zarr per task (locked)
 
-- **Committed in git:** labeled zarr **and** the labeling notebook. After clone, use `data/raw/pusht/pusht.zarr/` directly—no Colab or external download required for training.
-- **Regeneration (optional):** open `data/pusht/pushT_labeling.ipynb` in Colab, run all cells (notebook handles download, labeling, and export), then place the output zip into the repo and commit.
+| Path | Contents |
+|------|----------|
+| `data/raw/pusht/pusht.zarr/` | Push-T demos + label arrays |
+| `data/raw/square/square.zarr/` | Square demos + label arrays (later) |
+
+**Demonstrations (always):** `data/img`, `data/state`, `data/action`, `meta/episode_ends`.
+
+**Option labels (added over time, same store):**
+
+| Array | When present | Written by |
+|-------|----------------|------------|
+| `data/option_id_supervised` | After heuristic / VLM labeling | `supervised/pusht/build_zarr.py` or `supervised/square/build_zarr.py` (TBD) |
+| `data/option_id_unsupervised` | After LOVE pipeline | `unsupervised/love_adapter/` into same zarr |
+
+Supervised and unsupervised experiments share the **same zarr path**; YAML sets `option_id_key` to select the column. LOVE reads demos from that zarr, trains offline, and **appends** `option_id_unsupervised`—no duplicate image store.
+
+**Source-of-truth model (Push-T; same pattern for Square):**
+
+- **In repo (§7 row 3):** `data/README.md`, train-ready `data/raw/pusht/pusht.zarr/` (`option_id_supervised`), `soda/option_discovery/` (pusht scripts + square placeholder), and `environment.yml` with `zarr<3`. No Columbia download required for training.
+- **Regeneration (optional):** `python -m soda.option_discovery.supervised.pusht.build_zarr` from repo root ([`soda/option_discovery/README.md`](soda/option_discovery/README.md)).
 
 ### Push-T (E1)
 
 | Artifact | Path | In git |
 |----------|------|--------|
-| Labeling notebook | `data/pusht/pushT_labeling.ipynb` | Yes |
+| Labeling script | `soda/option_discovery/supervised/pusht/build_zarr.py` | Yes |
 | Labeled dataset | `data/raw/pusht/pusht.zarr/` | Yes (~19 MB) |
 
 **Regeneration workflow** (only when labels or export logic change)
 
-1. Open `data/pusht/pushT_labeling.ipynb` in **Colab** and **Run all** — the notebook does everything (raw data, heuristic labels, zarr export, zip download).
-2. Take the **zipped output** from Colab and upload it to `data/raw/pusht/` in this repo.
-3. Unzip so the dataset lives at `data/raw/pusht/pusht.zarr/`, then commit the updated zarr (and notebook if you changed it).
+1. Place Columbia replay zip at `data/processed/pusht_cache/pusht_cchi_v7_replay.zarr.zip` (manual download; see `supervised/pusht/README.md`).
+2. From repo root: `python -m soda.option_discovery.supervised.pusht.build_zarr` (in-place relabel if zarr exists) or `build_zarr --force` (full rebuild from zip).
+3. Check: `python -m soda.option_discovery.supervised.pusht.visualize_labels`
+4. Commit updated `data/raw/pusht/pusht.zarr/` if labels changed.
 
 **Zarr schema**
 
-```
+```text
 data/raw/pusht/pusht.zarr/
-  data/img, state, action, option_id
+  data/img, state, action
+  data/option_id_supervised      # E1 — heuristic
+  data/option_id_unsupervised    # E3 — LOVE (added when pipeline runs)
   meta/episode_ends
 ```
 
@@ -379,25 +485,26 @@ Example: `T=25650`, `206` episodes. Requires `zarr<3.0`.
 
 **At training time**
 
-- Config points to `data/raw/pusht/pusht.zarr/` (this section).
+- Config points to `data/raw/pusht/pusht.zarr/` and `option_id_key` (`option_id_supervised` or `option_id_unsupervised`).
 - `soda/dataset/option_aware_dataset.py` opens that path and yields batches (extends DP dataset behavior; see §4.2).
-- `beta_label` derived from `option_id` change points (optional cache in `data/processed/pusht/`).
+- **`beta_label`:** not stored in zarr — computed via `derive_beta_labels(option_ids, episode_ends)` (last frame of each option segment within each episode). Optional cache in `data/processed/pusht/` later. Tests: `tests/test_derive_beta_labels.py`.
 
 ### Square (E2) — later
 
-Same pattern: Colab notebook in git + labeled zarr in git; regen = run Colab → upload output zip → `data/raw/square/square.zarr/` (size TBD for whether zarr stays in git).
+Same **one zarr per task** pattern as Push-T. Supervised labels via future [`supervised/square/build_zarr.py`](soda/option_discovery/supervised/square/) (VLM); unsupervised via same [`unsupervised/love_adapter/`](soda/option_discovery/unsupervised/love_adapter/) with `configs/square/soda_unsupervised.yaml`. Whether `data/raw/square/square.zarr/` stays in git depends on size (TBD).
 
-Labeling methods (heuristic, VLM, LOVE): [§2 Option discovery](#option-discovery). LOVE zarr paths and adapter work: §7 runbook.
+See [§2 Option discovery](#option-discovery) and §7 rows 29–30.
 
 ### Git policy
 
 | Path | In git? | Notes |
 |------|---------|-------|
-| `data/pusht/pushT_labeling.ipynb` | Yes | Regeneration recipe |
+| `soda/option_discovery/supervised/pusht/` | Yes | Push-T label build script |
 | `data/raw/pusht/pusht.zarr/` | Yes (~19 MB) | Default training input |
-| `data/square/square_labeling.ipynb` | Yes (when added) | Regeneration recipe |
+| `soda/option_discovery/supervised/square/` | Yes | E2 placeholder (VLM build script TBD) |
 | `data/raw/square/square.zarr/` | TBD | Commit if size allows |
-| `data/README.md`, `soda/README.md`, `configs/README.md`, `scripts/README.md`, `experiments/README.md` | Yes | Short; see §3 Folder READMEs |
+| `data/README.md`, `soda/README.md`, `soda/option_discovery/README.md`, `configs/README.md`, `scripts/README.md`, `modal/README.md`, `experiments/README.md` | Yes | Short; see §3 Folder READMEs |
+| `data/processed/pusht_cache/` | No | Columbia zip cache for regen |
 | `data/processed/`, `experiments/*` | No | Checkpoints and logs |
 | `experiments/README.md` | Yes | Allowed via `.gitignore` exception |
 
@@ -415,7 +522,7 @@ Labeling methods (heuristic, VLM, LOVE): [§2 Option discovery](#option-discover
 | **SODA E1** | From scratch | Heuristic ([§2](#option-discovery)) |
 | **SODA E3** | From scratch (soon after E1 path works) | LOVE ([§2](#option-discovery)) |
 
-Eval under DP protocol (300 steps, max overlap). **Matched regimes only** (see below). Minimum: E1 vs DP; target **E3 vs DP** (and optionally E3 vs E1) once LOVE zarr exists—see §7 rows 23–28.
+Eval under DP protocol (300 steps, max overlap). **Matched regimes only** (see below). Minimum: E1 vs DP; target **E3 vs DP** (and optionally E3 vs E1) once `option_id_unsupervised` exists in `pusht.zarr`—see §7 rows 22–27.
 
 ### Full method list
 
@@ -460,72 +567,73 @@ Vanilla DP already scores very high at 300 steps. Consider later: test-time nois
 
 Work top to bottom. Experiment IDs: [§2 Experiments](#experiments-22--p0).
 
+**Status column:** ☑ = required **files and layout exist locally** (stubs OK). Git commit/push is outside this checklist.
+
 #### A. Setup and data (Push-T / E1)
 
 | # | Task | Ref | Assigned | Status |
 |---|------|-----|----------|--------|
 | 1 | Approve plan + [§3 layout](#3-repository-layout) | — | Umar | ☑ |
 | 2 | Move labeled zarr → `data/raw/pusht/pusht.zarr/` | Step 1 | Umar | ☑ |
-| 3 | Commit `data/README.md`, zarr, `environment.yml` (`zarr<3`); notebook via Drive script after first commit | §5 | Umar | ☐ |
-| 4 | Scaffold `soda/`, configs, scripts, folder READMEs, `.gitignore` (§3) | Step 0 | Umar | ☑ |
-| 5 | `environment.yml` + DP conda setup | Step 0 | Umar | ☐ |
-| 6 | Push-T zarr on disk at `data/raw/pusht/pusht.zarr/` (train-ready; git add with commit) | §5 | Umar | ☑ |
-| 7 | `derive_beta_labels` from `option_id` in dataset | Step 3 | Umar | ☐ |
+| 3 | Push-T data bundle: `data/README.md`, `pusht.zarr` (+ `option_id_supervised`), `option_discovery/supervised/pusht/`, `environment.yml` (`zarr<3`) | §5 | Umar | ☑ |
+| 4 | Scaffold `soda/`, `configs/`, `scripts/`, `modal/` (stubs), folder READMEs, `.gitignore` (§3) | Step 0 | Umar | ☑ |
+| 5 | Local: `environment.yml` (`conda activate soda`) + `modal run modal/modal_smoke.py` | §3 Compute | Umar | ☑ |
+| 6 | `derive_beta_labels` in `option_aware_dataset.py` (+ `tests/test_derive_beta_labels.py`) | Step 3, §5 | Umar | ☑ |
 
 #### B. Baseline (frozen DP)
 
 | # | Task | Ref | Assigned | Status |
 |---|------|-----|----------|--------|
-| 8 | Add + init `third_party` submodules (`diffusion_policy`, `love`); pin commits — see `scripts/setup_submodules.sh` | §4.1 | Umar | ☑ |
-| 9 | Load frozen Push-T checkpoint; smoke eval | Step 4, §6 | Umar | ☐ |
-| 10 | Baseline metrics per regime (open / closed / receding) | §6 | Umar | ☐ |
+| 7 | Add + init `third_party` submodules (`diffusion_policy`, `love`); pin commits — see `scripts/setup_submodules.sh` | §4.1 | Umar | ☑ |
+| 8 | Load frozen Push-T checkpoint; smoke eval | Step 4, §6 | Umar | ☐ |
+| 9 | Baseline metrics per regime (open / closed / receding) | §6 | Umar | ☐ |
 
 #### C. SODA core code
 
 | # | Task | Ref | Assigned | Status |
 |---|------|-----|----------|--------|
-| 11 | `temporal_stretch.py` | §4.2 | Umar | ☐ |
-| 12 | `option_aware_dataset.py` | §4.2 | Umar | ☐ |
-| 13 | `low_policy.py` | §2, §4.2 | Umar | ☐ |
-| 14 | `termination_head.py` | §2, §4.2 | Umar | ☐ |
-| 15 | `losses.py` + `train_low.py` | §4.2 | Umar | ☐ |
-| 16 | `high_policy.py` + `train_high.py` | §2, §4.2 | Umar | ☐ |
-| 17 | `hierarchical_controller.py` + `control_regimes.py` | §4.2 | Umar | ☐ |
-| 18 | `metrics.py` + `run_eval.py` | §6 | Umar | ☐ |
-| 19 | `configs/pusht/soda_supervised.yaml`, `baseline_vanilla.yaml` | §2, §4.3 | Umar | ☐ |
+| 10 | `temporal_stretch.py` | §4.2 | Umar | ☐ |
+| 11 | `option_aware_dataset.py` | §4.2 | Umar | ☐ |
+| 12 | `low_policy.py` | §2, §4.2 | Umar | ☐ |
+| 13 | `termination_head.py` | §2, §4.2 | Umar | ☐ |
+| 14 | `losses.py` + `train_low.py` | §4.2 | Umar | ☐ |
+| 15 | `high_policy.py` + `train_high.py` | §2, §4.2 | Umar | ☐ |
+| 16 | `hierarchical_controller.py` + `control_regimes.py` | §4.2 | Umar | ☐ |
+| 17 | `metrics.py` + `run_eval.py` | §6 | Umar | ☐ |
+| 18 | `configs/pusht/soda_supervised.yaml`, `baseline_vanilla.yaml` | §2, §4.3 | Umar | ☐ |
 
 #### D. Train E1 (Push-T)
 
 | # | Task | Ref | Assigned | Status |
 |---|------|-----|----------|--------|
-| 20 | Train `pi_low` | Step 8, E1 | Umar | ☐ |
-| 21 | Train `pi_high` (flow matching) | Step 9, E1 | Umar | ☐ |
-| 22 | Sanity hierarchical rollout (one regime) | §6 | Umar | ☐ |
+| 19 | Train `pi_low` | Step 8, E1 | Umar | ☐ |
+| 20 | Train `pi_high` (flow matching) | Step 9, E1 | Umar | ☐ |
+| 21 | Sanity hierarchical rollout (one regime) | §6 | Umar | ☐ |
 
 #### E. P0 eval gate (Push-T: E1 + E3)
 
 | # | Task | Ref | Assigned | Status |
 |---|------|-----|----------|--------|
-| 23 | Eval frozen DP vs SODA E1 (matched regimes) | P0, §6 | Umar | ☐ |
-| 24 | Log E1 vs DP; note saturation vs DP refs | §6 | Umar | ☐ |
-| 25 | LOVE: explore `third_party/love`; image encoder adapter in `love_adapter/` | §2, §8F | Neetish | ☐ |
-| 26 | LOVE: run on Push-T demos → export `option_id` zarr (separate path from E1, e.g. `pusht_love.zarr`) | §2 | Neetish | ☐ |
-| 27 | Document `num_options`; wire `configs/pusht/soda_unsupervised.yaml` | §4.3 | Neetish | ☐ |
-| 28 | Train/eval SODA E3; eval vs frozen DP (optional: E3 vs E1) | E3, §6 | Neetish | ☐ |
-| 29 | Decide stress tests + regime priority | §8G, §6 | Umar | ☐ |
+| 22 | Eval frozen DP vs SODA E1 (matched regimes) | P0, §6 | Umar | ☐ |
+| 23 | Log E1 vs DP; note saturation vs DP refs | §6 | Umar | ☐ |
+| 24 | LOVE: explore `third_party/love`; image encoder adapter in `unsupervised/love_adapter/` | §2, §8F | Neetish | ☐ |
+| 25 | LOVE: train on `pusht.zarr` demos → write `option_id_unsupervised` into same zarr | §2, §5 | Neetish | ☐ |
+| 26 | Document `num_options`; wire `configs/pusht/soda_unsupervised.yaml` | §4.3 | Neetish | ☐ |
+| 27 | Train/eval SODA E3; eval vs frozen DP (optional: E3 vs E1) | E3, §6 | Neetish | ☐ |
+| 28 | Decide stress tests + regime priority | §8G, §6 | Umar | ☐ |
 
-**P0 exit:** E1 end-to-end train + eval vs DP (≥1 fair regime). E3: LOVE-labeled Push-T zarr in repo + E3 train/eval vs DP logged when ready.
+**P0 exit:** E1 end-to-end train + eval vs DP (≥1 fair regime). E3: `option_id_unsupervised` in `pusht.zarr` + E3 train/eval vs DP logged when ready.
 
 #### F. After P0
 
 | # | Task | Ref | Assigned | Status |
 |---|------|-----|----------|--------|
-| 30 | `square_labeling.ipynb` + `data/raw/square/square.zarr` (VLM; fork from Push-T notebook) | E2, §2 | Neetish | ☐ |
-| 31 | LOVE: export Square zarr (E4) | §2 | Neetish | ☐ |
-| 32 | Frozen DP Square baseline | E2 | Umar | ☐ |
-| 33 | Train/eval E2 (Square, VLM supervised) | E2 | Umar | ☐ |
-| 34 | Train/eval E4 (Square, LOVE) | E4 | Neetish | ☐ |
-| 35 | Cross-matrix comparison write-up | Step 14 | Both | ☐ |
+| 29 | `supervised/square/build_zarr.py` (VLM) + `data/raw/square/square.zarr` | E2, §2 | Neetish | ☐ |
+| 30 | LOVE: write `option_id_unsupervised` into `square.zarr` (E4) | §2, §5 | Neetish | ☐ |
+| 31 | Frozen DP Square baseline | E2 | Umar | ☐ |
+| 32 | Train/eval E2 (Square, VLM supervised) | E2 | Umar | ☐ |
+| 33 | Train/eval E4 (Square, LOVE) | E4 | Neetish | ☐ |
+| 34 | Cross-matrix comparison write-up | Step 14 | Both | ☐ |
 
 ---
 
@@ -542,6 +650,9 @@ Work top to bottom. Experiment IDs: [§2 Experiments](#experiments-22--p0).
 | Horizon decode | Mean-pool horizon channel |
 | Termination grads | `stop_grad(bottleneck)` for β |
 | Option conditioning | `Embedding(ω)` → concat global cond |
+| Zarr / options | One store per task; `option_id_supervised` + `option_id_unsupervised`; `option_id_key` in YAML |
+| `beta_label` storage | **Not** in raw zarr; `derive_beta_labels` at load time (last frame per option segment) |
+| Option labeling code | `soda/option_discovery/supervised/{task}/`, `unsupervised/love_adapter/` |
 
 ### B. High-level flow matching (open)
 
@@ -557,12 +668,13 @@ Fixed `beta_transition` + val sweep (recommended) vs calibrated threshold.
 
 ### F. LOVE integration (open)
 
-Concept: [§2 Option discovery](#option-discovery). Implementation: §7 rows 25–28 (Push-T), 31 (Square).
+Concept: [§2 Option discovery](#option-discovery). Implementation: §7 rows 24–27 (Push-T), 30 (Square).
+
+**Locked:** one zarr per task; LOVE trains on `img` / `state` / `action` and writes `data/option_id_unsupervised` into that store (see [§5](#one-zarr-per-task-locked)).
 
 | Choice | Options |
 |--------|---------|
 | Encoder | Image adapter in `love_adapter` (recommended) vs low-dim LOVE vs boundaries-only |
-| E3 zarr | Separate `pusht_love.zarr` vs copy of `pusht.zarr` with new `option_id` |
 
 ### G. Stochasticity / stress evaluation (Push-T)
 
@@ -581,8 +693,8 @@ Run P0 on standard protocol first; then noise / shorter horizon / epoch budget (
 
 ## 10. Open questions
 
-- [ ] Unique Push-T `option_id` values / `num_options`
-- [ ] `square_labeling.ipynb` pipeline
+- [ ] Unique Push-T `option_id_supervised` values / `num_options` (and LOVE skill count for E3)
+- [ ] Square VLM pipeline (`supervised/square/build_zarr.py`)
 - [ ] Frozen Push-T DP checkpoint for P0
 - [ ] Push-T stress-test protocol
 - [ ] Experiment priority list (methods × task × regime)
@@ -620,8 +732,8 @@ git checkout dev_neetish
 
 ### Commits
 
-- **Commit:** Push-T zarr (~19 MB), labeling notebooks, code/configs, `.gitmodules`
-- **Do not commit:** `experiments/`, checkpoints, large Square zarr (until sized)
+- **Commit:** Push-T zarr (~19 MB), `soda/option_discovery/` scripts, code/configs, `.gitmodules`
+- **Do not commit:** `data/processed/` (Columbia zip cache), `experiments/`, checkpoints, large Square zarr (until sized)
 
 ---
 
@@ -646,4 +758,16 @@ git checkout dev_neetish
 | 2026-05-17 | Option discovery (conceptual); P0 includes E3 LOVE; implementation in §7 only |
 | 2026-05-17 | Move option discovery from §4.3 → §2 (Architecture); §4.4 configs → §4.3 |
 | 2026-05-17 | §2 Component design: Execution loop + Policies (high / low subsections) |
+| 2026-05-18 | §7: merge rows 3+6 into row 3 (git bundle incl. notebook); renumber runbook to 34 rows |
+| 2026-05-18 | §3: Modal compute (train/eval on GPU); `modal/` layout; dual env files; Volume for `experiments/` |
+| 2026-05-18 | §7: checkoffs = local files only (not git); row 3 ☑; row 4 includes `modal/` stubs |
+| 2026-05-19 | §7 row 5 ☑: Modal smoke via `modal_smoke.py`; `train_low` entrypoints separated |
+| 2026-05-18 | §2/§5: **one zarr per task** with `option_id_supervised` + `option_id_unsupervised`; LOVE trains on demos and writes unsupervised labels in-place; §8F E3 zarr choice closed |
+| 2026-05-18 | `option_discovery/supervised/` + `unsupervised/`; Push-T Colab → `build_pusht_zarr.py`; remove local `pushT_labeling.ipynb` |
+| 2026-05-18 | `supervised/pusht/build_zarr.py` (was flat `build_pusht_zarr.py`) |
+| 2026-05-18 | Remove empty `square_labeling.ipynb`; add `supervised/square/` placeholder |
+| 2026-05-18 | **Doc sync:** §2–§5, §7, §8, §11 — `option_discovery` layout; no local labeling notebooks; `option_id_supervised` / `_unsupervised`; regen = `python -m ...pusht.build_zarr` |
+| 2026-05-19 | Single local env: `environment.yml` (`soda`); full DP pins → `environment.modal.yml`; remove `environment_local.yml` / `soda-local` |
+| 2026-05-18 | §7 row 6 ☑: `derive_beta_labels` + `tests/test_derive_beta_labels.py`; §8 locked `beta_label` = derived at load, not in zarr |
+| 2026-05-18 | `build_zarr`: manual Columbia zip path only (no gdown); regen docs in `supervised/pusht/README.md` |
 | 2026-05-17 | §11: branches `dev_umar`, `dev_neetish`, merge target `master` |
