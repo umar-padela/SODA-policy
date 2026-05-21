@@ -9,6 +9,7 @@ Layout
 - ``image``     — Linux + CUDA Python environment (mirrors environment.modal.yml / DP).
 - ``volume``    — persistent disk for checkpoints & logs (survives after GPU stops).
 - ``smoke``     — row-5 health check: torch, zarr, pusht.zarr on GPU.
+- ``eval_run`` — generic Push-T eval (policy + rollouts + multi-horizon metrics).
 - ``train_low`` — runs soda/training/train_low.py on a remote GPU (when implemented).
 
 Local vs remote
@@ -35,6 +36,9 @@ app = modal.App("soda-policy")
 REPO_ROOT = "/root/soda-policy"
 ZARR_PATH = f"{REPO_ROOT}/data/raw/pusht/pusht.zarr"
 EXPERIMENTS_MOUNT = "/experiments"
+DP_BASELINE_VOLUME_DIR = f"{EXPERIMENTS_MOUNT}/dp_baselines/pusht_image_cnn_train0"
+# Columbia frozen Push-T image CNN (train_0). Download once via ``download_frozen_dp``.
+FROZEN_DP_PUSHT_CHECKPOINT = f"{DP_BASELINE_VOLUME_DIR}/latest.ckpt"
 
 # ---------------------------------------------------------------------------
 # Image = recipe for the remote machine (OS packages + Python deps + your code)
@@ -58,6 +62,7 @@ image = (
         # Build C/Cython wheels (gym, pymunk, imagecodecs, ...)
         "g++",
         "make",
+        "cmake",
         "swig",
         "git",
         "curl",
@@ -95,6 +100,7 @@ image = (
         "einops==0.4.1",
         "tqdm==4.64.1",
         "dill==0.3.5.1",
+        "pandas==1.5.3",
         "matplotlib==3.6.1",
         "scikit-image==0.19.3",
         "imageio==2.22.0",
@@ -105,21 +111,24 @@ image = (
         "opencv-python-headless==4.6.0.66",
         "wandb==0.13.3",
         "diffusers==0.11.1",
+        "huggingface_hub==0.16.4",
         "accelerate==0.13.2",
         "termcolor==2.0.1",
         "pygame==2.1.2",
         "scipy==1.9.1",
+        "numba==0.56.4",
         "shapely==1.8.4",
         "psutil==5.9.2",
         "click==8.0.4",
     )
-    # # Square / robomimic path (Push-T E1 can run without these; keep for DP parity)
-    # .pip_install(
-    #     "free-mujoco-py==2.1.6",
-    #     "robosuite @ https://github.com/cheng-chi/robosuite/archive/277ab9588ad7a4f4b55cf75508b44aa67ec171f0.tar.gz",
-    #     "robomimic==0.2.0",
-    #     "dm-control==1.0.9",
-    # )
+    # Columbia frozen DP (hybrid workspace) needs robomimic + Columbia robosuite fork.
+    # That fork pins numba<=0.53.1 (no py3.10 wheels) — install with --no-deps; numba 0.56.4 above.
+    .pip_install("cffi==1.15.1")
+    .run_commands(
+        "pip install --no-cache-dir 'mujoco-py==2.1.2.14'",
+        'pip install --no-cache-dir --no-deps "robosuite @ https://github.com/cheng-chi/robosuite/archive/277ab9588ad7a4f4b55cf75508b44aa67ec171f0.tar.gz"',
+        "pip install --no-cache-dir 'robomimic==0.2.0'",
+    )
     .add_local_dir(
         ".",
         remote_path=REPO_ROOT,
@@ -208,6 +217,83 @@ def smoke() -> dict:
 
     print("SODA Modal smoke OK:", out)
     return out
+
+
+@app.function(
+    image=image,
+    gpu="T4",
+    timeout=7200,
+    volumes={EXPERIMENTS_MOUNT: volume},
+)
+def download_frozen_dp(
+    dest_path: str = FROZEN_DP_PUSHT_CHECKPOINT,
+) -> str:
+    """
+    One-time download of Columbia frozen DP ``latest.ckpt`` onto the Volume.
+
+    Eval does not download automatically — run this, then pass ``dest_path``
+    to ``modal_eval.py --checkpoint``.
+    """
+    from soda.eval.dp_baseline import ensure_dp_checkpoint
+
+    path = ensure_dp_checkpoint(Path(dest_path), download=True)
+    volume.commit()
+    print(f"Frozen DP checkpoint ready: {path}")
+    return str(path)
+
+
+@app.function(
+    image=image,
+    gpu="T4",
+    timeout=7200,
+    volumes={EXPERIMENTS_MOUNT: volume},
+)
+def eval_run(
+    checkpoint_path: str,
+    policy_source: str = "dp_baseline",
+    task: str = "pusht",
+    soda_config_name: str = "soda_supervised",
+    ckpt_slug: str | None = None,
+    smoke: bool = True,
+    regime: str = "receding",
+    action_horizon: int = 1,
+    n_test: int | None = None,
+    max_steps: int = 300,
+) -> dict:
+    """
+    Generic Push-T eval on Modal: load policy → roll out → overlap @ 150/200/250/300.
+
+    See ``soda.eval.run_eval.EvalConfig`` and ``modal/modal_eval.py`` CLI.
+    """
+    from soda.eval.run_eval import EvalConfig, resolve_eval_output_dir, run_pusht_eval
+
+    if n_test is None:
+        n_test = 5 if smoke else 50
+
+    ckpt = Path(checkpoint_path)
+    cfg = EvalConfig(
+        checkpoint_path=ckpt,
+        task=task,  # type: ignore[arg-type]
+        policy_source=policy_source,  # type: ignore[arg-type]
+        soda_config_name=soda_config_name,
+        ckpt_slug=ckpt_slug,
+        device="cuda:0",
+        regime=regime,  # type: ignore[arg-type]
+        action_horizon=action_horizon,
+        n_test=n_test,
+        n_train=0,
+        max_steps=max_steps,
+    )
+
+    out_dir = resolve_eval_output_dir(
+        cfg, Path(EXPERIMENTS_MOUNT), ckpt_slug=ckpt_slug
+    )
+    result = run_pusht_eval(cfg, out_dir)
+
+    volume.commit()
+    result["output_dir"] = str(out_dir)
+    print("eval_run OK:", {k: result[k] for k in result if k != "metrics"})
+    return result
 
 
 @app.function(

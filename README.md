@@ -80,6 +80,8 @@ To **regenerate** Push-T supervised labels (optional): `python -m soda.option_di
 conda env create -f environment.yml
 conda activate soda
 modal run modal/modal_smoke.py          # infrastructure smoke test
+modal run modal/modal_download_dp.py    # one-time frozen DP ckpt on Volume
+modal run modal/modal_eval.py --checkpoint /experiments/dp_baselines/pusht_image_cnn_train0/latest.ckpt
 # modal run modal/modal_train_low.py ...   (when train_low.py is implemented)
 ```
 

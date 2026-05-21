@@ -12,8 +12,8 @@ Option labeling (offline): [`option_discovery/README.md`](option_discovery/READM
 |--------|------|
 | `dataset/` | PyTorch `Dataset` loaders (read zarr under repo `data/raw/`) |
 | `models/` | `LowPolicy`, `HighPolicy`, `TerminationHead` |
-| `training/` | `train_low.py`, `train_high.py`, `losses.py` |
-| `inference/` | `HierarchicalController`, control regimes (open / closed / receding) |
+| `training/` | `train_low.py`, `train_high.py`, `losses_low.py`, `losses_high.py` |
+| `inference/` | `HierarchicalController`, control regimes (open / receding; Ta=1 via `action_horizon`) |
 | `eval/` | Metrics and eval driver |
 | `option_discovery/supervised/pusht/` | Push-T heuristic → `option_id_supervised` |
 | `option_discovery/supervised/square/` | Square VLM placeholder (E2) |

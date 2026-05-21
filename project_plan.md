@@ -28,7 +28,7 @@ Build a hierarchical imitation-learning policy where a high-level controller sel
 
 Option discovery is studied in a **2×2 matrix**: **supervised** vs **unsupervised (LOVE)** × **Push-T** vs **Square**—four training regimes sharing the same hierarchical stack. Labeling strategy per task is in [§2 Option discovery](#option-discovery); implementation steps are in [§7](#7-execution-runbook).
 
-Compare against vanilla Diffusion Policy under open-loop, closed-loop (`T_a=1`), and receding-horizon (`T_a=8`) control, with **matched regimes** (DP open ↔ SODA open, etc.). **Push-T** is scored by **max block–target overlap (%)** over a fixed step budget; **Square** uses the standard DP success metric.
+Compare against vanilla Diffusion Policy under a **matched eval protocol**. **P0 (locked):** pure **closed-loop** control — replan every step (`action_horizon=1`). **Later (optional):** open-loop and receding-horizon (`T_a=8`, execute 8 actions per plan). **Push-T** is scored by **max block–target overlap (%)** over a fixed step budget; **Square** uses the standard DP success metric.
 
 ---
 
@@ -134,15 +134,16 @@ Same stack (`pi_high` + `pi_low` + termination); only **how options are labeled*
 | **Supervised** | Heuristic (`supervised/pusht/build_zarr`) | VLM (`supervised/square/`, TBD) |
 | **Unsupervised (LOVE)** | LOVE → `option_id_unsupervised` | LOVE → `option_id_unsupervised` |
 
-**Comparisons we care about:** supervision type (supervised vs LOVE); task (Push-T vs Square); vs frozen vanilla DP per regime.
+**Comparisons we care about:** supervision type (supervised vs LOVE); task (Push-T vs Square); vs frozen vanilla DP under the **same closed-loop eval protocol** (P0).
 
 | ID | Discovery | Task | Owner | Status | Runbook |
 |----|-----------|------|-------|--------|---------|
-| **P0** | Push-T eval gate: E1 vs frozen DP; E3 (LOVE) labels + train/eval soon after | Push-T | See §7 | Not started | §7 rows 22–27 |
-| **E1** | Heuristic supervised | Push-T | Umar | Zarr **complete** | §7 rows 2–21, 22–23 |
-| **E2** | VLM supervised | Square | See §7 | Not started | §7 rows 29, 31–32 |
-| **E3** | LOVE unsupervised | Push-T | See §7 | Not started | §7 rows 24–27 |
-| **E4** | LOVE unsupervised | Square | See §7 | Not started | §7 rows 30, 33 |
+| **M1** | π_high option-id prediction (supervised vs LOVE labels) | Push-T | Umar | Not started | §7 rows 10–17 |
+| **P0** | Push-T eval gate: full SODA vs frozen DP (closed-loop) | Push-T | See §7 | Not started | §7 rows 26–29 |
+| **E1** | Heuristic supervised | Push-T | Umar | Zarr **complete** | §7 C (π_high), then §7 E–F |
+| **E2** | VLM supervised | Square | See §7 | Not started | §7 rows 30–32 |
+| **E3** | LOVE unsupervised | Push-T | See §7 | Not started | §7 rows 13–16, 17 |
+| **E4** | LOVE unsupervised | Square | See §7 | Not started | §7 rows 33–34 |
 
 ### Component design (locked)
 
@@ -163,8 +164,8 @@ Same stack (`pi_high` + `pi_low` + termination); only **how options are labeled*
 ##### Low-level policy (`pi_low`)
 
 - **Backbone:** [Diffusion Policy](https://github.com/real-stanford/diffusion_policy) 1D U-Net; extend via **subclasses in `soda/`** only ([§4.1](#41-third-party-dependencies)).
-- **Temporal stretching:** variable segment length → train at `h_max`; predict **D+1** actions (horizon channel).
-- **Horizon decode (locked):** `h_pred = mean(actions[..., -1])` → `TemporalStretcher.unstretch` ([§4.2](#42-soda-package-code-map)).
+- **Temporal stretching:** variable segment length → train at `horizon_stretch_max` (hyperparameter, typically longest skill); predict **D+1** actions (duration channel). Not eval `action_horizon`.
+- **Duration decode (locked):** `segment_steps_pred = mean(actions[..., -1]) * horizon_stretch_max` → `TemporalStretcher.unstretch` ([§4.2](#42-soda-package-code-map)).
 - **Termination:** `beta = MLP(stop_grad(bottleneck))`; BCE; no grad from β into U-Net ([§8](#8-open-design-decisions)).
 - **Option conditioning (locked):** integer ω from configured zarr column (`option_id_supervised` or `option_id_unsupervised`) → `nn.Embedding` → **concat** to global cond (not raw integer).
 - **Loss:** `L_total = L_diffusion + L_termination` (no λ for shared-encoder balancing).
@@ -195,18 +196,19 @@ SODA-policy/
 │   ├── README.md                         #   package overview → project_plan §3
 │   ├── dataset/                          #   PyTorch loaders (NOT zarr files — see root data/)
 │   │   ├── temporal_stretch.py           #   TemporalStretcher.stretch / .unstretch
-│   │   └── option_aware_dataset.py       #   derive_beta_labels ✓; OptionLabeledZarrDataset (§7 row 11)
+│   │   └── option_aware_dataset.py       #   OptionLabeledZarrDataset ☑ (§7 row 11)
 │   ├── models/
 │   │   ├── low_policy.py                 #   LowPolicy (subclasses DP DiffusionUnetImagePolicy)
 │   │   ├── high_policy.py                #   HighPolicy (flow matching π_high)
 │   │   └── termination_head.py           #   TerminationHead
 │   ├── training/
-│   │   ├── losses.py                     #   L_diffusion + L_termination
+│   │   ├── losses_low.py                 #   L_diffusion + L_termination (π_low)
+│   │   ├── losses_high.py                #   flow-matching loss (π_high)
 │   │   ├── train_low.py                  #   π_low + termination (DP-style workspace loop)
 │   │   └── train_high.py                 #   π_high flow matching
 │   ├── inference/
 │   │   ├── hierarchical_controller.py    #   HierarchicalController
-│   │   └── control_regimes.py            #   open / closed Ta=1 / receding Ta=8
+│   │   └── control_regimes.py            #   P0: action_horizon=1; optional open / receding later
 │   ├── eval/
 │   │   ├── metrics.py                    #   Push-T overlap %; Square success
 │   │   └── run_eval.py
@@ -365,7 +367,7 @@ We use the **same Zarr v2 layout** as [Diffusion Policy](https://github.com/real
 | Reuse from DP (`third_party/diffusion_policy/dataset/`) | SODA-specific (in `soda/dataset/`) |
 |--------------------------------------------------------|-----------------------------------|
 | Zarr reading, episode indexing, image obs normalization patterns (`pusht_image_dataset.py`, `square_*`) | Read `option_id_key` from config; segment demos by option boundaries |
-| Sequence sampling / windowing ideas | `TemporalStretcher` — variable-horizon stretch to `h_max` |
+| Sequence sampling / windowing ideas | `TemporalStretcher` — stretch native segments to `horizon_stretch_max` |
 | — | `derive_beta_labels` from selected option column (last frame per segment; §7 row 6 ☑) |
 
 **Implementation approach:** subclass or wrap DP’s image dataset where possible; only fork logic that must change (option segments, stretch, β labels). Do not duplicate the whole loader if upstream helpers suffice.
@@ -373,15 +375,16 @@ We use the **same Zarr v2 layout** as [Diffusion Policy](https://github.com/real
 | Path (see §3 tree) | Key symbols | Role |
 |------|-------------|------|
 | `dataset/temporal_stretch.py` | `TemporalStretcher.stretch`, `.unstretch` | Resample segments; mean-pool horizon decode |
-| `dataset/option_aware_dataset.py` | `derive_beta_labels` ☑; `OptionLabeledZarrDataset` (row 11) | Load root `data/raw/.../*.zarr`; DP-compatible + SODA fields |
+| `dataset/option_aware_dataset.py` | `derive_beta_labels` ☑; `OptionLabeledZarrDataset` ☑ | Load root `data/raw/.../*.zarr`; DP-compatible + SODA fields |
 | `models/low_policy.py` | `LowPolicy` | Subclasses DP `DiffusionUnetImagePolicy`; embed(ω) + D+1 + β hook |
 | `models/high_policy.py` | `HighPolicy` | Flow-matching `pi_high` |
 | `models/termination_head.py` | `TerminationHead` | `MLP(stop_grad(bottleneck))` |
-| `training/losses.py` | — | `L_diffusion + L_termination` |
+| `training/losses_low.py` | `diffusion_loss`, `termination_bce_loss`, `low_policy_total_loss` | π_low losses |
+| `training/losses_high.py` | `flow_matching_option_loss` | π_high flow matching |
 | `training/train_low.py` | — | π_low + termination training loop (extends DP workspace pattern) |
-| `training/train_high.py` | `flow_matching_option_loss` | π_high flow matching |
+| `training/train_high.py` | — | π_high training loop (uses `losses_high`) |
 | `inference/hierarchical_controller.py` | `HierarchicalController` | Option loop + β threshold |
-| `inference/control_regimes.py` | `run_control_regime` | Open / Ta=1 / Ta=8 |
+| `inference/control_regimes.py` | `ControlParams`, `action_horizon` | P0: closed-loop (`h=1`); open / `h=8` optional |
 | `eval/metrics.py` | `EvalMetrics` | Push-T overlap %; Square success |
 | `eval/run_eval.py` | — | Rollout + logging |
 | `option_discovery/supervised/pusht/` | `build_zarr`, `visualize_labels`, `heuristics` | Push-T heuristic → `option_id_supervised` |
@@ -493,7 +496,7 @@ Example: `T=25650`, `206` episodes. Requires `zarr<3.0`.
 
 Same **one zarr per task** pattern as Push-T. Supervised labels via future [`supervised/square/build_zarr.py`](soda/option_discovery/supervised/square/) (VLM); unsupervised via same [`unsupervised/love_adapter/`](soda/option_discovery/unsupervised/love_adapter/) with `configs/square/soda_unsupervised.yaml`. Whether `data/raw/square/square.zarr/` stays in git depends on size (TBD).
 
-See [§2 Option discovery](#option-discovery) and §7 rows 29–30.
+See [§2 Option discovery](#option-discovery) and §7 rows 30, 33 (Square).
 
 ### Git policy
 
@@ -522,7 +525,7 @@ See [§2 Option discovery](#option-discovery) and §7 rows 29–30.
 | **SODA E1** | From scratch | Heuristic ([§2](#option-discovery)) |
 | **SODA E3** | From scratch (soon after E1 path works) | LOVE ([§2](#option-discovery)) |
 
-Eval under DP protocol (300 steps, max overlap). **Matched regimes only** (see below). Minimum: E1 vs DP; target **E3 vs DP** (and optionally E3 vs E1) once `option_id_unsupervised` exists in `pusht.zarr`—see §7 rows 22–27.
+Eval under DP protocol (300 steps, max overlap). **P0 uses closed-loop only** (`action_horizon=1`; see below). DP and SODA must use the **same** protocol when compared. Minimum: E1 vs DP; target **E3 vs DP** (and optionally E3 vs E1) once `option_id_unsupervised` exists in `pusht.zarr`—see §7 rows 26–28. **Earlier milestone:** π_high label accuracy only — §7 rows 15–17 (no sim).
 
 ### Full method list
 
@@ -532,19 +535,21 @@ Eval under DP protocol (300 steps, max overlap). **Matched regimes only** (see b
 4. SODA E3 (Push-T, LOVE)
 5. SODA E4 (Square, LOVE)
 
-### Control regimes (matched comparison)
+### Control protocol (eval)
 
-| Regime | DP vs SODA |
-|--------|------------|
-| Open-loop | open ↔ open |
-| Closed-loop (`T_a=1`) | closed ↔ closed |
-| Receding (`T_a=8`) | receding ↔ receding |
+| Phase | Protocol | Modal / eval flags | Notes |
+|-------|----------|-------------------|--------|
+| **P0 (locked)** | **Closed-loop** | `action_horizon=1` (replan every sim step after each `predict_action`) | Default for frozen DP baseline and SODA comparisons |
+| *Later* | Open-loop | `regime=open` | Single plan at episode start; no replan |
+| *Later* | Receding-horizon | `action_horizon=8` (DP paper style) | Predict full chunk, execute 8, replan |
 
-Do not cross-pair regimes (e.g. DP receding vs SODA open-loop).
+Do not cross-pair protocols (e.g. DP closed-loop vs SODA open-loop).
 
-### Scope prioritization (TBD)
+**Implementation:** `soda/inference/control_regimes.py` + `modal run modal/modal_eval.py` (`--action-horizon`, optional `--regime`).
 
-Full grid `{methods} × {tasks} × {regimes} × {stress}` is too large. Decide minimal set after P0. See [§8G](#g-stochasticity--stress-evaluation-push-t).
+### Scope prioritization
+
+P0 grid: `{methods} × Push-T × closed-loop`. Defer `{open-loop, receding} × {stress}` until after baseline + E1 gate. See [§8G](#g-stochasticity--stress-evaluation-push-t).
 
 ### Metrics
 
@@ -569,7 +574,11 @@ Work top to bottom. Experiment IDs: [§2 Experiments](#experiments-22--p0).
 
 **Status column:** ☑ = required **files and layout exist locally** (stubs OK). Git commit/push is outside this checklist.
 
-#### A. Setup and data (Push-T / E1)
+**Milestone-first (assignment):** Train and evaluate **π_high only** before π_low is ready. Compare option-id prediction on a held-out episode split for **supervised** labels (`option_id_supervised`, E1) vs **LOVE** labels (`option_id_unsupervised`, E3). Metrics: val accuracy, per-class recall, confusion matrix — **not** sim success. Full hierarchical P0 (π_low + closed-loop Push-T) stays in §7.E–F.
+
+**Prerequisites already done (π_low dataset path):** `temporal_stretch.py` ☑, `option_aware_dataset.py` ☑ (segment index + β); π_high reuses the same zarr and segment boundaries.
+
+#### A. Setup and data (Push-T)
 
 | # | Task | Ref | Assigned | Status |
 |---|------|-----|----------|--------|
@@ -578,62 +587,74 @@ Work top to bottom. Experiment IDs: [§2 Experiments](#experiments-22--p0).
 | 3 | Push-T data bundle: `data/README.md`, `pusht.zarr` (+ `option_id_supervised`), `option_discovery/supervised/pusht/`, `environment.yml` (`zarr<3`) | §5 | Umar | ☑ |
 | 4 | Scaffold `soda/`, `configs/`, `scripts/`, `modal/` (stubs), folder READMEs, `.gitignore` (§3) | Step 0 | Umar | ☑ |
 | 5 | Local: `environment.yml` (`conda activate soda`) + `modal run modal/modal_smoke.py` | §3 Compute | Umar | ☑ |
-| 6 | `derive_beta_labels` in `option_aware_dataset.py` (+ `tests/test_derive_beta_labels.py`) | Step 3, §5 | Umar | ☑ |
+| 6 | `derive_beta_labels` in `option_aware_dataset.py` (+ `tests/test_derive_beta_labels.py`) | §5 | Umar | ☑ |
+| 7 | Add + init `third_party` submodules (`diffusion_policy`, `love`); pin commits — `scripts/setup_submodules.sh` | §4.1 | Umar | ☑ |
 
-#### B. Baseline (frozen DP)
-
-| # | Task | Ref | Assigned | Status |
-|---|------|-----|----------|--------|
-| 7 | Add + init `third_party` submodules (`diffusion_policy`, `love`); pin commits — see `scripts/setup_submodules.sh` | §4.1 | Umar | ☑ |
-| 8 | Load frozen Push-T checkpoint; smoke eval | Step 4, §6 | Umar | ☐ |
-| 9 | Baseline metrics per regime (open / closed / receding) | §6 | Umar | ☐ |
-
-#### C. SODA core code
+#### B. Baseline (frozen DP) — parallel / non-blocking for M1
 
 | # | Task | Ref | Assigned | Status |
 |---|------|-----|----------|--------|
-| 10 | `temporal_stretch.py` | §4.2 | Umar | ☐ |
-| 11 | `option_aware_dataset.py` | §4.2 | Umar | ☐ |
-| 12 | `low_policy.py` | §2, §4.2 | Umar | ☐ |
-| 13 | `termination_head.py` | §2, §4.2 | Umar | ☐ |
-| 14 | `losses.py` + `train_low.py` | §4.2 | Umar | ☐ |
-| 15 | `high_policy.py` + `train_high.py` | §2, §4.2 | Umar | ☐ |
-| 16 | `hierarchical_controller.py` + `control_regimes.py` | §4.2 | Umar | ☐ |
-| 17 | `metrics.py` + `run_eval.py` | §6 | Umar | ☐ |
-| 18 | `configs/pusht/soda_supervised.yaml`, `baseline_vanilla.yaml` | §2, §4.3 | Umar | ☐ |
+| 8 | Load frozen Push-T checkpoint; smoke eval (`modal/modal_eval.py`) | §6 | Umar | ☑ |
+| 9 | Baseline metrics — **closed-loop** (`action_horizon=1`, full 50 eps) | §6 | Umar | ☐ |
 
-#### D. Train E1 (Push-T)
+#### C. Milestone M1 — π_high option prediction (E1 + E3 labels)
 
 | # | Task | Ref | Assigned | Status |
 |---|------|-----|----------|--------|
-| 19 | Train `pi_low` | Step 8, E1 | Umar | ☐ |
-| 20 | Train `pi_high` (flow matching) | Step 9, E1 | Umar | ☐ |
-| 21 | Sanity hierarchical rollout (one regime) | §6 | Umar | ☐ |
+| 10 | `high_policy.py` + `losses_high.py` + `train_high.py` (+ `modal/modal_train_high.py`) | §2, §4.2 | Umar | ☐ |
+| 11 | `OptionStartDataset`: segment-start `(obs, option_id)` from zarr (reuse `build_option_segment_index`) | §4.2 | Umar | ☐ |
+| 12 | Configs: `configs/pusht/soda_supervised.yaml` + `soda_unsupervised.yaml` — `train_high`, `high_policy`, `dataset.option_id_key` | §4.3 | Umar | ☐ |
+| 13 | LOVE: explore `third_party/love`; image encoder adapter in `unsupervised/love_adapter/` | §2, §8F | Neetish | ☐ |
+| 14 | LOVE: train on `pusht.zarr` demos → write `option_id_unsupervised` into same zarr | §2, §5 | Neetish | ☐ |
+| 15 | Train π_high on **E1** labels (`option_id_supervised`) | M1, E1 | Umar | ☐ |
+| 16 | Train π_high on **E3** labels (`option_id_unsupervised`) | M1, E3 | Umar | ☐ |
+| 17 | **Milestone eval:** π_high val **option-id accuracy** (and confusion matrix) for E1 vs E3; same episode split / seeds | M1 | Umar | ☐ |
 
-#### E. P0 eval gate (Push-T: E1 + E3)
+**M1 exit:** Two trained π_high checkpoints + table/plot comparing prediction quality under heuristic vs LOVE labels. No π_low or sim rollouts required.
 
-| # | Task | Ref | Assigned | Status |
-|---|------|-----|----------|--------|
-| 22 | Eval frozen DP vs SODA E1 (matched regimes) | P0, §6 | Umar | ☐ |
-| 23 | Log E1 vs DP; note saturation vs DP refs | §6 | Umar | ☐ |
-| 24 | LOVE: explore `third_party/love`; image encoder adapter in `unsupervised/love_adapter/` | §2, §8F | Neetish | ☐ |
-| 25 | LOVE: train on `pusht.zarr` demos → write `option_id_unsupervised` into same zarr | §2, §5 | Neetish | ☐ |
-| 26 | Document `num_options`; wire `configs/pusht/soda_unsupervised.yaml` | §4.3 | Neetish | ☐ |
-| 27 | Train/eval SODA E3; eval vs frozen DP (optional: E3 vs E1) | E3, §6 | Neetish | ☐ |
-| 28 | Decide stress tests + regime priority | §8G, §6 | Umar | ☐ |
-
-**P0 exit:** E1 end-to-end train + eval vs DP (≥1 fair regime). E3: `option_id_unsupervised` in `pusht.zarr` + E3 train/eval vs DP logged when ready.
-
-#### F. After P0
+#### D. SODA core code — π_low + full eval (after M1)
 
 | # | Task | Ref | Assigned | Status |
 |---|------|-----|----------|--------|
-| 29 | `supervised/square/build_zarr.py` (VLM) + `data/raw/square/square.zarr` | E2, §2 | Neetish | ☐ |
-| 30 | LOVE: write `option_id_unsupervised` into `square.zarr` (E4) | §2, §5 | Neetish | ☐ |
+| — | *(done)* `temporal_stretch.py`, `option_aware_dataset.py` | §4.2 | Umar | ☑ |
+| — | *(done)* `control_regimes.py`; eval scaffolding `metrics.py`, `run_eval.py`, `pusht_rollout.py` | §6 | Umar | ☑ |
+| 18 | `low_policy.py` | §2, §4.2 | Umar | ☐ |
+| 19 | `termination_head.py` | §2, §4.2 | Umar | ☐ |
+| 20 | `losses_low.py` + `train_low.py` (+ `modal/modal_train_low.py`) | §4.2 | Umar | ☐ |
+| 21 | `hierarchical_controller.py` (π_high + π_low + β at inference) | §4.2 | Umar | ☐ |
+| 22 | Fill `configs/pusht/soda_*.yaml` for π_low (`horizon_stretch_max`, DP workspace hooks); `baseline_vanilla.yaml` | §4.3 | Umar | ☐ |
+
+#### E. Train full SODA (Push-T)
+
+| # | Task | Ref | Assigned | Status |
+|---|------|-----|----------|--------|
+| 23 | Train π_low on E1 (`option_id_supervised`) | E1 | Umar | ☐ |
+| 24 | Train π_low on E3 (`option_id_unsupervised`) — optional parallel with E1 | E3 | Umar | ☐ |
+| 25 | Sanity hierarchical rollout (closed-loop; π_high from §7.C) | §6 | Umar | ☐ |
+
+*π_high training for E1/E3 is already §7.C15–16; do not retrain unless π_low pipeline requires fresh checkpoints.*
+
+#### F. P0 eval gate (Push-T sim vs frozen DP)
+
+| # | Task | Ref | Assigned | Status |
+|---|------|-----|----------|--------|
+| 26 | Eval frozen DP vs SODA E1 (matched **closed-loop**, `action_horizon=1`) | P0, §6 | Umar | ☐ |
+| 27 | Log E1 vs DP; note saturation vs DP refs | §6 | Umar | ☐ |
+| 28 | Eval SODA E3 vs frozen DP (same protocol); optional E3 vs E1 sim comparison | E3, §6 | Neetish | ☐ |
+| 29 | Decide stress tests; optional open-loop / receding-horizon runs | §8G, §6 | Umar | ☐ |
+
+**P0 exit:** End-to-end SODA (π_high + π_low + β) vs frozen DP on Push-T under **closed-loop** (`action_horizon=1`). M1 (§7.C) is a separate, earlier deliverable.
+
+#### G. After P0 (Square + write-up)
+
+| # | Task | Ref | Assigned | Status |
+|---|------|-----|----------|--------|
+| 30 | `supervised/square/build_zarr.py` (VLM) + `data/raw/square/square.zarr` | E2, §2 | Neetish | ☐ |
 | 31 | Frozen DP Square baseline | E2 | Umar | ☐ |
 | 32 | Train/eval E2 (Square, VLM supervised) | E2 | Umar | ☐ |
-| 33 | Train/eval E4 (Square, LOVE) | E4 | Neetish | ☐ |
-| 34 | Cross-matrix comparison write-up | Step 14 | Both | ☐ |
+| 33 | LOVE: write `option_id_unsupervised` into `square.zarr` (E4) | §2, §5 | Neetish | ☐ |
+| 34 | Train/eval E4 (Square, LOVE); π_high milestone pattern if time | E4 | Neetish | ☐ |
+| 35 | Cross-matrix comparison write-up | §2 | Both | ☐ |
 
 ---
 
@@ -668,7 +689,7 @@ Fixed `beta_transition` + val sweep (recommended) vs calibrated threshold.
 
 ### F. LOVE integration (open)
 
-Concept: [§2 Option discovery](#option-discovery). Implementation: §7 rows 24–27 (Push-T), 30 (Square).
+Concept: [§2 Option discovery](#option-discovery). Implementation: §7 rows 13–14 (Push-T, early for M1), 33 (Square).
 
 **Locked:** one zarr per task; LOVE trains on `img` / `state` / `action` and writes `data/option_id_unsupervised` into that store (see [§5](#one-zarr-per-task-locked)).
 
@@ -695,9 +716,10 @@ Run P0 on standard protocol first; then noise / shorter horizon / epoch budget (
 
 - [ ] Unique Push-T `option_id_supervised` values / `num_options` (and LOVE skill count for E3)
 - [ ] Square VLM pipeline (`supervised/square/build_zarr.py`)
-- [ ] Frozen Push-T DP checkpoint for P0
+- [x] Frozen Push-T DP checkpoint for P0 — image `diffusion_policy_cnn` / `train_0` / `latest.ckpt` (Modal Volume; see `configs/pusht/baseline_vanilla.yaml`)
 - [ ] Push-T stress-test protocol
-- [ ] Experiment priority list (methods × task × regime)
+- [x] P0 eval protocol — **closed-loop** (`action_horizon=1`); open / receding deferred
+- [ ] Experiment priority list (methods × task; extra regimes if time)
 - [ ] GPU budget → SODA training length
 - [ ] `beta_transition` sweep range
 - [ ] FM parameterization details
@@ -770,4 +792,7 @@ git checkout dev_neetish
 | 2026-05-19 | Single local env: `environment.yml` (`soda`); full DP pins → `environment.modal.yml`; remove `environment_local.yml` / `soda-local` |
 | 2026-05-18 | §7 row 6 ☑: `derive_beta_labels` + `tests/test_derive_beta_labels.py`; §8 locked `beta_label` = derived at load, not in zarr |
 | 2026-05-18 | `build_zarr`: manual Columbia zip path only (no gdown); regen docs in `supervised/pusht/README.md` |
+| 2026-05-18 | §7 row 8: `modal_eval.py` → `eval_run` → `run_eval` / `pusht_rollout` / `metrics` (overlap @ 150–300); DP ckpt on Volume |
+| 2026-05-18 | §6 / §7: **P0 eval protocol locked** — closed-loop (`action_horizon=1`); open-loop + receding-horizon deferred |
+| 2026-05-21 | §7 reordered: **M1 milestone** (π_high accuracy, E1 vs LOVE labels) before π_low / full P0 sim eval |
 | 2026-05-17 | §11: branches `dev_umar`, `dev_neetish`, merge target `master` |
