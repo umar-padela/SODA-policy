@@ -37,7 +37,7 @@ modal run modal/modal_download_dp.py
 modal run modal/modal_eval.py --checkpoint /experiments/dp_baselines/pusht_image_cnn_train0/latest.ckpt
 ```
 
-Eval outputs live under `/experiments/eval/pusht/<descriptive_run_name>/` (see `soda/eval/run_naming.py`).
+Eval outputs live under `/experiments/eval/pusht/<descriptive_run_name>/` on the container mount (see `soda/eval/run_naming.py`). From your laptop, use volume path `eval/pusht/<run_dir_name>/` (no `/experiments` prefix) — see [`modal/README.md`](../modal/README.md).
 
 See [`modal/README.md`](../modal/README.md) and [`configs/pusht/baseline_vanilla.yaml`](../configs/pusht/baseline_vanilla.yaml).
 

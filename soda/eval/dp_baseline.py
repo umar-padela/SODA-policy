@@ -1,7 +1,7 @@
 """
 Frozen Diffusion Policy Push-T baseline — checkpoint download helpers.
 
-Eval logic lives in ``run_eval.py`` + ``pusht_rollout.py`` (shared with SODA).
+Eval logic lives in ``run_eval.py`` + ``dp_runner.py`` / ``soda_runner.py``.
 """
 
 from __future__ import annotations

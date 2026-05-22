@@ -1,5 +1,7 @@
 """
-Push-T sim rollouts for eval (receding or open control).
+Legacy Push-T rollouts (custom loop). Prefer ``dp_runner`` / ``soda_runner``.
+
+Kept for reference and optional open-loop experiments until fully ported.
 """
 
 from __future__ import annotations

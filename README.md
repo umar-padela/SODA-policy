@@ -72,12 +72,13 @@ To **regenerate** Push-T supervised labels (optional): `python -m soda.option_di
 
 | File | Use |
 |------|-----|
-| [`environment.yml`](environment.yml) | **Local conda env** — Modal, W&B, labeling tools (`zarr`, `opencv`, …) |
+| [`environment.yml`](environment.yml) | **Local conda env** — Modal, W&B, labeling tools, PyTorch (CPU) for local dev |
 | [`environment.modal.yml`](environment.modal.yml) | Pin reference for Modal GPU image only (full DP stack) |
 | `modal/modal_config.py` | Remote image + Volume for checkpoints |
 
 ```bash
 conda env create -f environment.yml
+# if the env already exists: conda env update -f environment.yml --prune
 conda activate soda
 modal run modal/modal_smoke.py          # infrastructure smoke test
 modal run modal/modal_download_dp.py    # one-time frozen DP ckpt on Volume

@@ -1,7 +1,8 @@
 """
 Local entrypoint for Push-T eval on Modal (§7 rows 8–9, 17, 22).
 
-All GPU rollouts go through ``eval_run`` → ``soda.eval.run_eval.run_pusht_eval``.
+DP baselines use Columbia ``PushTImageRunner`` (via ``soda.eval.dp_runner``) with
+``n_action_steps=1`` by default (closed-loop). MP4s land in ``output_dir/media/``.
 Every run requires ``--checkpoint`` (frozen DP, your DP retrain, or SODA).
 
 Examples (repo root):
@@ -37,6 +38,9 @@ def main(
     action_horizon: int = 1,
     n_test: int | None = None,
     max_steps: int = 300,
+    record_video: bool = True,
+    n_test_vis: int | None = None,
+    no_video: bool = False,
 ):
     """
     Run Push-T eval on Modal.
@@ -62,11 +66,17 @@ def main(
         ``receding`` (default): replan every ``action_horizon`` steps (default 1).
         ``open``: single plan, no replan.
     action_horizon
-        Actions executed before replanning (default 1).
+        DP ``n_action_steps``: actions executed per replan (default 1 = closed-loop).
     n_test
         Override episode count.
     max_steps
         Max sim steps per episode (use 5 for a fast wiring check).
+    record_video
+        Save MP4 rollouts for the first ``n_test_vis`` test episodes.
+    n_test_vis
+        How many test episodes get videos (default ``min(n_test, 4)``).
+    no_video
+        Skip MP4 recording.
     """
     result = eval_run.remote(
         checkpoint_path=checkpoint,
@@ -79,6 +89,8 @@ def main(
         action_horizon=action_horizon,
         n_test=n_test,
         max_steps=max_steps,
+        record_video=record_video and not no_video,
+        n_test_vis=n_test_vis,
     )
 
     print("\n--- eval_run result ---")
@@ -93,7 +105,12 @@ def main(
     for key in sorted(metrics):
         if isinstance(key, str) and key.startswith("mean_score@"):
             print(f"  {key}: {metrics[key]}")
-    print("Done. See eval_log.json on Modal Volume soda-experiments.")
+    videos = (metrics.get("video_paths") or [])
+    if videos:
+        print("  video_paths:")
+        for path in videos:
+            print(f"    {path}")
+    print("Done. See eval_log.json and media/*.mp4 on Modal Volume soda-experiments.")
 
 
 # Documented default for frozen DP (still requires explicit --checkpoint at CLI).

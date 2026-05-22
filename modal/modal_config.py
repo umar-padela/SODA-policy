@@ -68,6 +68,8 @@ image = (
         "curl",
         "wget",
         "libglib2.0-0",
+        # Runtime libs for PyAV manylinux wheels (eval MP4 recording)
+        "ffmpeg",
     )
     .run_commands(
         "mkdir -p /root/.mujoco",
@@ -106,7 +108,7 @@ image = (
         "imageio==2.22.0",
         "imageio-ffmpeg==0.4.7",
         "Cython==0.29.32",
-        "gym==0.23.1",
+        "gym==0.23.1",  # 0.21 sdist fails on modern pip; use runner_common.vector_env_reset()
         "pymunk==6.2.1",
         "opencv-python-headless==4.6.0.66",
         "wandb==0.13.3",
@@ -121,6 +123,9 @@ image = (
         "psutil==5.9.2",
         "click==8.0.4",
     )
+    # PyAV: conda pins 10.0.0; pip has no py3.10 wheel for 10.x (Cython build fails on Modal).
+    # 12.3.0 ships manylinux binaries — same API used by diffusion_policy VideoRecorder.
+    .pip_install("av==12.3.0")
     # Columbia frozen DP (hybrid workspace) needs robomimic + Columbia robosuite fork.
     # That fork pins numba<=0.53.1 (no py3.10 wheels) — install with --no-deps; numba 0.56.4 above.
     .pip_install("cffi==1.15.1")
@@ -259,6 +264,8 @@ def eval_run(
     action_horizon: int = 1,
     n_test: int | None = None,
     max_steps: int = 300,
+    record_video: bool = True,
+    n_test_vis: int | None = None,
 ) -> dict:
     """
     Generic Push-T eval on Modal: load policy → roll out → overlap @ 150/200/250/300.
@@ -283,6 +290,8 @@ def eval_run(
         n_test=n_test,
         n_train=0,
         max_steps=max_steps,
+        record_video=record_video,
+        n_test_vis=n_test_vis,
     )
 
     out_dir = resolve_eval_output_dir(

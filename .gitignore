@@ -219,8 +219,12 @@ __marimo__/
 
 # --- SODA-project ---
 # Course assignment reference copies (Modal patterns); not part of SODA deliverables
+assignment1/
 assignment2/
 assignment3/
+
+# Rollout / eval videos
+*.mp4
 
 tmp/
 data/processed/

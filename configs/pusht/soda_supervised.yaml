@@ -1,0 +1,24 @@
+# Push-T SODA eval/train config (supervised option labels).
+# Env runner fields mirror diffusion_policy ``config/task/pusht_image.yaml``.
+
+name: soda_supervised
+
+n_obs_steps: 2
+n_action_steps: 8
+horizon: 16
+past_action_visible: false
+obs_as_global_cond: true
+
+task:
+  name: pusht_image
+  env_runner:
+    legacy_test: true
+    test_start_seed: 100000
+    max_steps: 300
+    fps: 10
+    crf: 22
+    render_size: 96
+    tqdm_interval_sec: 5.0
+  dataset:
+    zarr_path: data/raw/pusht/pusht.zarr
+    option_id_key: option_id_supervised

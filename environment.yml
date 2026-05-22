@@ -1,18 +1,22 @@
 # Single local conda env for this repo (laptop).
 #
 #   conda env create -f environment.yml
+#   conda env update -f environment.yml --prune   # refresh after dep changes
 #   conda activate soda
 #
-# Includes: Modal CLI, W&B, Push-T labeling pipeline (zarr, opencv, …).
-# GPU training stack (PyTorch, mujoco, DP) runs on Modal — pin reference in
-# environment.modal.yml and modal/modal_config.py.
+# Includes: Modal CLI, W&B, Push-T labeling (zarr, opencv, …), PyTorch (CPU) for
+# local tests and soda/ model dev. Full GPU DP stack: environment.modal.yml + Modal.
 
 name: soda
 channels:
+  - pytorch
   - conda-forge
 dependencies:
   - python=3.10
   - pip
+  - pytorch
+  - torchvision
+  - cpuonly
   - numpy=1.23.3
   - matplotlib=3.6.1
   - zarr=2.12.0
