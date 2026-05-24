@@ -20,10 +20,10 @@ import tqdm
 from soda.eval.metrics import DEFAULT_OVERLAP_CHECKPOINTS
 from soda.eval.policy_loaders import _require_diffusion_policy, load_dp_image_policy_and_cfg
 from soda.eval.runner_common import (
+    extract_env_action_chunk,
     resolve_test_start_seed,
     runner_log_to_soda_metrics,
     serialize_runner_log,
-    slice_action_chunk,
     vector_env_reset,
 )
 from soda.eval.run_naming import DEFAULT_TEST_START_SEED
@@ -147,8 +147,8 @@ class SodaPushTImageRunner:
                     action_dict,
                     lambda x: x.detach().to("cpu").numpy(),
                 )
-                action = slice_action_chunk(
-                    np_action_dict["action"],
+                action = extract_env_action_chunk(
+                    np_action_dict,
                     self._inner.n_action_steps,
                 )
 
@@ -200,11 +200,12 @@ def run_dp_pusht_eval(
     checkpoint: Path,
     output_dir: Path,
     device: str = "cuda:0",
+    eval_yaml_cfg: Any | None = None,
     n_test: int = 5,
     n_train: int = 0,
     n_test_vis: int | None = None,
     n_train_vis: int = 0,
-    n_action_steps: int = 1,
+    n_action_steps: int = 8,
     max_steps: int = 300,
     test_start_seed: int = DEFAULT_TEST_START_SEED,
     train_start_seed: int = 0,
@@ -218,8 +219,14 @@ def run_dp_pusht_eval(
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "media").mkdir(parents=True, exist_ok=True)
 
-    policy, _settings, cfg = load_dp_image_policy_and_cfg(checkpoint, device=device)
-    seed = resolve_test_start_seed(test_start_seed, cfg)
+    policy, _settings, ckpt_cfg = load_dp_image_policy_and_cfg(checkpoint, device=device)
+    if eval_yaml_cfg is not None:
+        from soda.training.dp_config import merge_eval_yaml_into_ckpt_cfg
+
+        runner_cfg = merge_eval_yaml_into_ckpt_cfg(ckpt_cfg, eval_yaml_cfg)
+    else:
+        runner_cfg = ckpt_cfg
+    seed = resolve_test_start_seed(test_start_seed, runner_cfg)
 
     if n_test_vis is None:
         n_test_vis = min(n_test, 4) if record_video else 0
@@ -227,7 +234,7 @@ def run_dp_pusht_eval(
         n_test_vis = 0
 
     runner = build_pusht_image_runner(
-        cfg,
+        runner_cfg,
         output_dir,
         n_test=n_test,
         n_train=n_train,

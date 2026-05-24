@@ -67,9 +67,14 @@ def test_high_policy_fm_loss_and_sample():
     }
     option_id = torch.tensor([0, 2, 1], dtype=torch.long)
 
-    loss = policy(obs, option_id)
+    loss, logs = policy.compute_loss({"obs": obs, "option_id": option_id})
     assert loss.ndim == 0
     assert torch.isfinite(loss)
+    assert logs["loss"] >= 0.0
+
+    loss_forward = policy(obs, option_id)
+    assert loss_forward.ndim == 0
+    assert torch.isfinite(loss_forward)
 
     pred = policy.sample_option(policy.encode_obs(obs))
     assert pred.shape == (B,)

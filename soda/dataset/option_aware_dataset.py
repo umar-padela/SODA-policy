@@ -1,8 +1,9 @@
 """
-Option-aware PyTorch dataset for SODA (project_plan §4.2, §7 row 11).
+Option-aware PyTorch dataset for π_low training (project_plan §4.2).
 
 Loads DP-format zarr, indexes contiguous option segments, and applies
-``TemporalStretcher`` to action targets.
+``TemporalStretcher`` to action targets. Shared segment/obs helpers are
+also used by ``option_start_dataset`` (π_high).
 
 References
 ----------
@@ -130,7 +131,53 @@ def build_option_segment_index(
     return segments
 
 
-def _episode_train_mask(
+def native_actions_from_anchor(
+    action: ArrayLike,
+    seg: OptionSegment,
+    anchor: int,
+) -> np.ndarray:
+    """
+    Expert actions from ``anchor`` (inclusive) through ``seg.end`` (exclusive).
+
+    Used for π_low training: obs at ``anchor`` supervises the **remaining** skill
+    trajectory (suffix), not actions before ``anchor``.
+    """
+    if anchor < seg.start or anchor >= seg.end:
+        raise ValueError(
+            f"anchor {anchor} must lie in [{seg.start}, {seg.end}) for segment"
+        )
+    return np.asarray(action[anchor : seg.end], dtype=np.float32)
+
+
+def obs_window_at_anchor(
+    img: Any,
+    state: Any,
+    seg: OptionSegment,
+    anchor: int,
+    n_obs_steps: int,
+) -> dict[str, np.ndarray]:
+    """``n_obs_steps`` frames ending at ``anchor`` (inclusive), padded at segment start."""
+    win_end = anchor + 1
+    win_start = max(seg.start, win_end - n_obs_steps)
+
+    imgs: list[np.ndarray] = []
+    states: list[np.ndarray] = []
+    for idx in range(win_start, win_end):
+        frame = np.asarray(img[idx], dtype=np.uint8)
+        imgs.append(np.moveaxis(frame, -1, 0).astype(np.float32) / 255.0)
+        states.append(np.asarray(state[idx, :2], dtype=np.float32))
+
+    while len(imgs) < n_obs_steps:
+        imgs.insert(0, imgs[0].copy())
+        states.insert(0, states[0].copy())
+
+    return {
+        "image": np.stack(imgs[-n_obs_steps:], axis=0),
+        "agent_pos": np.stack(states[-n_obs_steps:], axis=0),
+    }
+
+
+def episode_train_mask(
     n_episodes: int,
     *,
     val_ratio: float,
@@ -171,24 +218,26 @@ def _config_get(cfg: Any, key: str, default: Any = None) -> Any:
     return getattr(cfg, key, default)
 
 
-class OptionLabeledZarrDataset:
+class OptionAwareDataset:
     """
     PyTorch ``Dataset`` over a task zarr with one sample per option segment.
 
     Each item:
     - ``obs`` — DP-compatible dict (``image`` CHW float, ``agent_pos``), length ``n_obs_steps``
-    - ``action`` — ``(horizon_stretch_max, D+1)`` after temporal stretch + duration channel
-    - ``option_id``, ``beta_label``, ``segment_length`` metadata
+    - ``action`` — ``(horizon, D+1)`` after temporal stretch + duration channel
+    - ``option_id``, ``beta_label``, ``segment_length`` (remaining native steps at anchor)
 
-    Observations are anchored at a random frame inside the segment (train split) so
-    ``beta_label`` includes both 0 and 1 examples.
+    Observations are anchored at a random frame inside the segment (train split).
+    Action targets are the **suffix** ``action[anchor:seg.end]`` (stretched to
+    ``horizon``), aligned with closed-loop replanning from arbitrary mid-skill states.
+    ``beta_label`` is ``1`` only when ``anchor`` is the segment's last frame.
     """
 
     def __init__(
         self,
         zarr_path: str | Path,
         option_id_key: str = "option_id_supervised",
-        horizon_stretch_max: int | None = None,
+        horizon: int | None = None,
         *,
         n_obs_steps: int = 2,
         min_segment_len: int = 1,
@@ -208,6 +257,7 @@ class OptionLabeledZarrDataset:
         self.n_obs_steps = int(n_obs_steps)
         self.min_segment_len = int(min_segment_len)
         self.random_anchor = bool(random_anchor)
+        self._stratified_encoded_indices = False
         self._val_ratio = float(val_ratio)
         self._seed = int(seed)
         self._max_train_episodes = max_train_episodes
@@ -240,20 +290,19 @@ class OptionLabeledZarrDataset:
             raise ValueError(f"No option segments found in {self.zarr_path}")
 
         max_seg_len = max(s.length for s in all_segments)
-        if horizon_stretch_max is None:
-            horizon_stretch_max = max_seg_len
-        self.horizon_stretch_max = int(horizon_stretch_max)
-        if max_seg_len > self.horizon_stretch_max:
+        if horizon is None:
+            horizon = max_seg_len
+        self.horizon = int(horizon)
+        if max_seg_len > self.horizon:
             raise ValueError(
-                f"longest segment ({max_seg_len}) exceeds horizon_stretch_max "
-                f"({self.horizon_stretch_max}); increase horizon_stretch_max or "
-                "filter segments"
+                f"longest segment ({max_seg_len}) exceeds horizon "
+                f"({self.horizon}); increase horizon or filter segments"
             )
 
-        self._stretcher = TemporalStretcher(horizon_stretch_max=self.horizon_stretch_max)
+        self._stretcher = TemporalStretcher(horizon=self.horizon)
 
         n_episodes = int(self._episode_ends.size)
-        train_ep_mask = _episode_train_mask(
+        train_ep_mask = episode_train_mask(
             n_episodes,
             val_ratio=val_ratio,
             seed=seed,
@@ -266,60 +315,68 @@ class OptionLabeledZarrDataset:
                 f"No segments after {'train' if train else 'val'} episode mask"
             )
 
-    def get_validation_dataset(self) -> OptionLabeledZarrDataset:
-        """Validation split (complement of train episode mask)."""
-        return OptionLabeledZarrDataset(
+    def enable_stratified_indices(self, enabled: bool = True) -> None:
+        """
+        When True, ``__getitem__`` accepts encoded indices from
+        :mod:`option_stratified_sampler` (segment-end vs random anchor).
+        """
+        self._stratified_encoded_indices = bool(enabled)
+
+    def get_validation_dataset(self) -> OptionAwareDataset:
+        """Validation split (complement of train episode mask).
+
+        Uses the same ``seed`` as train so ``episode_train_mask`` picks one val
+        set and val takes ``~train_mask`` (disjoint partition). Do not offset
+        ``seed`` here — that would define a different val split and leak episodes
+        into both train and val.
+        """
+        return OptionAwareDataset(
             zarr_path=self.zarr_path,
             option_id_key=self.option_id_key,
-            horizon_stretch_max=self.horizon_stretch_max,
+            horizon=self.horizon,
             n_obs_steps=self.n_obs_steps,
             min_segment_len=self.min_segment_len,
             val_ratio=self._val_ratio,
             seed=self._seed,
             max_train_episodes=self._max_train_episodes,
             train=False,
-            random_anchor=False,
+            random_anchor=self.random_anchor,
         )
 
     def __len__(self) -> int:
         return len(self.segments)
 
     def _obs_window(self, seg: OptionSegment, anchor: int) -> dict[str, np.ndarray]:
-        """``n_obs_steps`` frames ending at ``anchor`` (inclusive), padded at segment start."""
-        win_end = anchor + 1
-        win_start = max(seg.start, win_end - self.n_obs_steps)
-
-        imgs: list[np.ndarray] = []
-        states: list[np.ndarray] = []
-        for idx in range(win_start, win_end):
-            img = np.asarray(self._img[idx], dtype=np.uint8)
-            imgs.append(np.moveaxis(img, -1, 0).astype(np.float32) / 255.0)
-            states.append(np.asarray(self._state[idx, :2], dtype=np.float32))
-
-        while len(imgs) < self.n_obs_steps:
-            imgs.insert(0, imgs[0].copy())
-            states.insert(0, states[0].copy())
-
-        return {
-            "image": np.stack(imgs[-self.n_obs_steps :], axis=0),
-            "agent_pos": np.stack(states[-self.n_obs_steps :], axis=0),
-        }
+        return obs_window_at_anchor(
+            self._img, self._state, seg, anchor, self.n_obs_steps
+        )
 
     def __getitem__(self, index: int) -> dict[str, Any]:
         import torch
 
-        seg = self.segments[index]
-        if self.random_anchor:
+        from soda.dataset.option_stratified_sampler import decode_stratified_index
+
+        at_segment_end: bool | None = None
+        if self._stratified_encoded_indices:
+            seg_idx, at_segment_end = decode_stratified_index(index)
+            seg = self.segments[seg_idx]
+        else:
+            seg = self.segments[index]
+
+        if at_segment_end is True:
+            anchor = seg.end - 1
+        elif at_segment_end is False:
+            anchor = int(self._rng.integers(seg.start, seg.end))
+        elif self.random_anchor:
             anchor = int(self._rng.integers(seg.start, seg.end))
         else:
             anchor = seg.end - 1
 
         obs = self._obs_window(seg, anchor)
-        actions_native = np.asarray(
-            self._action[seg.start : seg.end], dtype=np.float32
-        )
+        actions_native = native_actions_from_anchor(self._action, seg, anchor)
         action = self._stretcher.stretch_with_duration(actions_native)
         beta = float(self._beta_labels[anchor])
+        remaining_len = int(seg.end - anchor)
 
         return {
             "obs": {
@@ -329,7 +386,7 @@ class OptionLabeledZarrDataset:
             "action": torch.from_numpy(action),
             "option_id": torch.tensor(seg.option_id, dtype=torch.long),
             "beta_label": torch.tensor(beta, dtype=torch.float32),
-            "segment_length": torch.tensor(seg.length, dtype=torch.long),
+            "segment_length": torch.tensor(remaining_len, dtype=torch.long),
             "segment_start": seg.start,
             "segment_end": seg.end,
             "anchor_index": anchor,
@@ -339,14 +396,37 @@ class OptionLabeledZarrDataset:
         """``(start, end, option_id)`` per segment for ``train_high`` / flow matching."""
         return [(s.start, s.end, s.option_id) for s in self.segments]
 
-    def get_normalizer(self, mode: str = "limits", **kwargs: Any) -> Any:
+    def get_normalizer(
+        self,
+        mode: str = "limits",
+        *,
+        max_segments: int = 512,
+        **kwargs: Any,
+    ) -> Any:
         """
-        DP-compatible ``LinearNormalizer`` (requires ``diffusion_policy`` installed).
-        """
-        from diffusion_policy.model.common.normalizer import LinearNormalizer
-        from diffusion_policy.common.normalize_util import get_image_range_normalizer
+        DP-compatible ``LinearNormalizer`` for π_low training (requires ``diffusion_policy``).
 
-        actions = np.asarray(self._action[:], dtype=np.float32)
+        Fits ``action`` on stretched **D+1** suffix chunks (duration channel included),
+        matching ``__getitem__`` (random anchor per segment). ``agent_pos`` / ``image``
+        use the same rules as vanilla DP.
+        """
+        from diffusion_policy.common.normalize_util import get_image_range_normalizer
+        from diffusion_policy.model.common.normalizer import LinearNormalizer
+
+        segments = self.segments
+        if len(segments) > max_segments:
+            rng = np.random.default_rng(0)
+            idxs = rng.choice(len(segments), size=max_segments, replace=False)
+            segments = [segments[int(i)] for i in idxs]
+
+        fit_rng = np.random.default_rng(0)
+        stretched: list[np.ndarray] = []
+        for seg in segments:
+            anchor = int(fit_rng.integers(seg.start, seg.end))
+            native = native_actions_from_anchor(self._action, seg, anchor)
+            stretched.append(self._stretcher.stretch_with_duration(native))
+        actions = np.stack(stretched, axis=0).reshape(-1, stretched[0].shape[-1])
+
         agent_pos = np.asarray(self._state[:, :2], dtype=np.float32)
         normalizer = LinearNormalizer()
         normalizer.fit(
@@ -359,11 +439,11 @@ class OptionLabeledZarrDataset:
         return normalizer
 
 
-def build_option_dataset_from_config(cfg: Any) -> OptionLabeledZarrDataset:
+def build_option_dataset_from_config(cfg: Any) -> OptionAwareDataset:
     """
-    Hydra-style factory: ``cfg.dataset`` (or flat ``cfg``) → ``OptionLabeledZarrDataset``.
+    Hydra-style factory: ``cfg.dataset`` (or flat ``cfg``) → ``OptionAwareDataset``.
 
-    Expected keys: ``zarr_path``, ``option_id_key``, ``horizon_stretch_max``,
+    Expected keys: ``zarr_path``, ``option_id_key``, ``horizon``,
     ``n_obs_steps``, ``min_segment_len``, ``val_ratio``, ``seed``, ``max_train_episodes``.
     """
     ds_cfg = _config_get(cfg, "dataset", cfg)
@@ -372,10 +452,14 @@ def build_option_dataset_from_config(cfg: Any) -> OptionLabeledZarrDataset:
         task = _config_get(ds_cfg, "task", "pusht")
         zarr_path = f"data/raw/{task}/{task}.zarr"
 
-    dataset = OptionLabeledZarrDataset(
+    horizon = _config_get(ds_cfg, "horizon", None)
+    if horizon is None:
+        horizon = _config_get(ds_cfg, "horizon_stretch_max", None)
+
+    dataset = OptionAwareDataset(
         zarr_path=zarr_path,
         option_id_key=_config_get(ds_cfg, "option_id_key", "option_id_supervised"),
-        horizon_stretch_max=_config_get(ds_cfg, "horizon_stretch_max", None),
+        horizon=horizon,
         n_obs_steps=int(_config_get(ds_cfg, "n_obs_steps", 2)),
         min_segment_len=int(_config_get(ds_cfg, "min_segment_len", 1)),
         val_ratio=float(_config_get(ds_cfg, "val_ratio", 0.0)),

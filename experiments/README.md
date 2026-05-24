@@ -6,13 +6,16 @@ Checkpoints, logs, and wandb runs go here. **Contents are gitignored** except th
 
 ```text
 experiments/
+  train_low/
+    soda_supervised/          # default when train_low.output_dir is null
+      best.ckpt
+      metrics.json
+  train_high/
+    soda_supervised/
   pusht/
-    dp_baseline/              # optional local copy of frozen DP .ckpt (gitignored)
-      latest.ckpt
-    e1_supervised_low/
-    e1_supervised_high/
-  square/
-    ...
+    dp_frozen/              # optional local copy of frozen DP .ckpt (gitignored)
+  eval/
+    pusht/                    # sim eval outputs (also on Modal Volume)
 ```
 
 ## Frozen DP Push-T baseline (§7 row 8)
@@ -39,8 +42,8 @@ modal run modal/modal_eval.py --checkpoint /experiments/dp_baselines/pusht_image
 
 Eval outputs live under `/experiments/eval/pusht/<descriptive_run_name>/` on the container mount (see `soda/eval/run_naming.py`). From your laptop, use volume path `eval/pusht/<run_dir_name>/` (no `/experiments` prefix) — see [`modal/README.md`](../modal/README.md).
 
-See [`modal/README.md`](../modal/README.md) and [`configs/pusht/baseline_vanilla.yaml`](../configs/pusht/baseline_vanilla.yaml).
+See [`modal/README.md`](../modal/README.md) and [`configs/pusht/dp_frozen.yaml`](../configs/pusht/dp_frozen.yaml).
 
-Set `checkpoint.save_dir` in SODA training configs to a path under this folder when training is implemented.
+Training writes to `experiments/train_low/{name}/` and `experiments/train_high/{name}/` by default (`name` from yaml, e.g. `soda_supervised`). Override with `train_low.output_dir` / `train_high.output_dir`.
 
 See [`project_plan.md`](../project_plan.md) for the experiment registry (E1–E4, P0).

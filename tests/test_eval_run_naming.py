@@ -13,7 +13,8 @@ from soda.eval.run_naming import (
 
 
 def test_policy_labels():
-    assert policy_label_from_config("dp_baseline") == "diffusion_policy"
+    assert policy_label_from_config("dp_frozen") == "dp_frozen"
+    assert policy_label_from_config("dp") == "dp"
     assert policy_label_from_config("soda", "soda_supervised") == "soda_supervised"
     assert policy_label_from_config("soda", "soda_unsupervised") == "soda_unsupervised"
 
@@ -34,15 +35,14 @@ def test_build_name_frozen_dp_smoke():
     ts = datetime(2026, 5, 22, 15, 30, 0, tzinfo=timezone.utc)
     name = build_eval_run_dir_name(
         task="pusht",
-        policy_label="diffusion_policy",
-        action_horizon=1,
-        regime="receding",
+        policy_label="dp_frozen",
+        n_action_steps=8,
         n_test=5,
         max_steps=300,
         checkpoint=Path("/experiments/dp_baselines/pusht_image_cnn_train0/latest.ckpt"),
         timestamp=ts,
     )
-    assert name.startswith("pusht_diffusion_policy_h1_receding_smoke5_ckpt-frozen_latest_t300_utc20260522-153000")
+    assert name.startswith("pusht_dp_frozen_h8_smoke5_ckpt-frozen_latest_t300_utc20260522-153000")
 
 
 def test_ckpt_slug_override():

@@ -183,11 +183,11 @@ class ObsEncoder(nn.Module):
 
     Weight source (pick one at construction)
     ----------------------------------------
-    - ``ObsEncoder.from_dp_checkpoint(...)`` — frozen Columbia ``latest.ckpt`` (implemented).
-    - ``ObsEncoder.from_low_policy_checkpoint(...)`` — trained π_low encoder (TODO).
+    - ``ObsEncoder.from_dp_checkpoint(...)`` — frozen Columbia ``latest.ckpt``.
+    - ``ObsEncoder.from_low_policy_checkpoint(...)`` — trained π_low vision + normalizer.
 
     Input ``obs`` keys: ``image`` ``(B, T, 3, H, W)``, ``agent_pos`` ``(B, T, 2)`` in [0, 1]
-    float for images (same as ``OptionLabeledZarrDataset``).
+    float for images (same as ``OptionAwareDataset``).
     """
 
     def __init__(
@@ -264,18 +264,22 @@ class ObsEncoder(nn.Module):
         checkpoint: str | Path,
         device: str = "cuda:0",
         *,
+        eval_cfg: Any | None = None,
         freeze: bool = True,
     ) -> ObsEncoder:
-        """
-        Build encoder from trained SODA π_low checkpoint.
+        """Build encoder from trained SODA π_low ``train_low`` checkpoint."""
+        from soda.eval.policy_loaders import load_frozen_low_obs_encoder
 
-        TODO §7 — after ``LowPolicy`` exists: load ``low_policy.obs_encoder`` + normalizer
-        the same way as ``from_dp_checkpoint``.
-        """
-        raise NotImplementedError(
-            "ObsEncoder.from_low_policy_checkpoint is not implemented yet. "
-            "Use ObsEncoder.from_dp_checkpoint for M1, or implement once LowPolicy "
-            "checkpoints expose obs_encoder + normalizer."
+        vision_encoder, normalizer, n_obs_steps, feat_dim = load_frozen_low_obs_encoder(
+            checkpoint, device=device, eval_cfg=eval_cfg
+        )
+        return cls(
+            vision_encoder,
+            normalizer,
+            n_obs_steps,
+            global_feat_dim=feat_dim,
+            source="soda_low",
+            freeze=freeze,
         )
 
     @torch.no_grad()
@@ -395,7 +399,7 @@ class HighPolicy(nn.Module):
     Training API
     ------------
     - ``encode_obs(obs)`` → ``global_feat``
-    - ``compute_fm_loss(global_feat, option_id)`` → scalar
+    - ``compute_loss(batch)`` → ``(loss_total, log_dict)``
 
     Inference API
     -------------
@@ -405,7 +409,8 @@ class HighPolicy(nn.Module):
     Construction
     ------------
     - ``HighPolicy(cfg, obs_encoder)`` — inject a built ``ObsEncoder``.
-    - ``HighPolicy.from_dp_checkpoint(cfg, path, device=...)`` — M1 default (frozen DP vision).
+    - ``HighPolicy.from_dp_checkpoint(cfg, path, device=...)`` — frozen Columbia DP vision.
+    - ``HighPolicy.from_low_policy_checkpoint(cfg, path, device=...)`` — frozen π_low vision.
     """
 
     def __init__(self, cfg: HighPolicyConfig, obs_encoder: ObsEncoder) -> None:
@@ -446,6 +451,21 @@ class HighPolicy(nn.Module):
         obs_encoder = ObsEncoder.from_dp_checkpoint(checkpoint, device=device)
         return cls(cfg, obs_encoder).to(device)
 
+    @classmethod
+    def from_low_policy_checkpoint(
+        cls,
+        cfg: HighPolicyConfig,
+        checkpoint: str | Path,
+        device: str = "cpu",
+        *,
+        eval_cfg: Any | None = None,
+    ) -> HighPolicy:
+        """Build π_high with frozen vision from a trained π_low checkpoint."""
+        obs_encoder = ObsEncoder.from_low_policy_checkpoint(
+            checkpoint, device=device, eval_cfg=eval_cfg
+        )
+        return cls(cfg, obs_encoder).to(device)
+
     def option_target(self, option_id: torch.Tensor) -> torch.Tensor:
         """
         Ground-truth flow endpoint x_1 for training.
@@ -475,13 +495,39 @@ class HighPolicy(nn.Module):
         """Delegate to ``OptionVelocityMLP`` (HW1: ``policy(xt, s_batch, t)``)."""
         return self.velocity_net(x_t, global_feat, t)
 
-    def compute_fm_loss(
-        self, global_feat: torch.Tensor, option_id: torch.Tensor
-    ) -> torch.Tensor:
-        """One-step FM loss; implementation lives in ``soda.training.losses_high``."""
-        from soda.training.losses_high import flow_matching_option_loss
+    def compute_loss(
+        self, batch: dict[str, Any], *, class_weights: torch.Tensor | None = None
+    ) -> tuple[torch.Tensor, dict[str, float]]:
+        """
+        π_high training loss: flow-matching MSE on option embeddings.
 
-        return flow_matching_option_loss(self, global_feat, option_id)
+        ``batch`` must contain ``obs`` and ``option_id`` (segment-start samples).
+        """
+        option_id = batch["option_id"].reshape(-1).long()
+        global_feat = self.encode_obs(batch["obs"])
+        loss = self._flow_matching_loss(
+            global_feat, option_id, class_weights=class_weights
+        )
+        return loss, {"loss": float(loss.detach().item())}
+
+    def _flow_matching_loss(
+        self,
+        global_feat: torch.Tensor,
+        option_id: torch.Tensor,
+        *,
+        class_weights: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        x1 = self.option_target(option_id)
+        batch_size = int(option_id.shape[0])
+        t = torch.rand(batch_size, device=option_id.device, dtype=x1.dtype)
+        x_t, v_tgt = self.schedule.interpolate(x1, t)
+        v_pred = self.predict_velocity(x_t, global_feat, t)
+        per_sample = F.mse_loss(v_pred, v_tgt, reduction="none").mean(dim=-1)
+        if class_weights is not None:
+            from soda.training.option_balance import weighted_option_mean
+
+            return weighted_option_mean(per_sample, option_id, class_weights)
+        return per_sample.mean()
 
     def discrete_decode_from_embedding(self, x_end: torch.Tensor) -> torch.Tensor:
         """
@@ -515,4 +561,5 @@ class HighPolicy(nn.Module):
         global_feat = self.encode_obs(obs)
         if option_id is None:
             return self.sample_option(global_feat)
-        return self.compute_fm_loss(global_feat, option_id)
+        loss, _ = self.compute_loss({"obs": obs, "option_id": option_id})
+        return loss

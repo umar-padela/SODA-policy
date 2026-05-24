@@ -34,7 +34,40 @@ def slice_action_chunk(action: np.ndarray, n_action_steps: int) -> np.ndarray:
     action = np.asarray(action)
     if action.ndim == 1:
         return action[:n_action_steps]
+    if action.ndim == 2:
+        return action[:n_action_steps]
     return action[:, :n_action_steps]
+
+
+def _tensor_to_numpy(action: Any) -> np.ndarray:
+    if hasattr(action, "detach"):
+        return action.detach().cpu().numpy()
+    return np.asarray(action)
+
+
+def extract_env_action_chunk(
+    action_dict: dict[str, Any],
+    n_action_steps: int,
+    *,
+    env_action_dim: int = 2,
+    squeeze_batch: bool = False,
+) -> np.ndarray:
+    """
+    Format policy output for ``MultiStepWrapper`` / Push-T env.
+
+    π_low: prefer ``action_unstretched`` (duration-decoded native time), then take
+    the first ``n_action_steps`` motion rows. Vanilla DP: use ``action`` directly.
+    """
+    if "action_unstretched" in action_dict and action_dict["action_unstretched"] is not None:
+        action = _tensor_to_numpy(action_dict["action_unstretched"])
+    else:
+        action = _tensor_to_numpy(action_dict["action"])
+        if action.shape[-1] > env_action_dim:
+            action = action[..., :env_action_dim]
+
+    if squeeze_batch and action.ndim == 3 and action.shape[0] == 1:
+        action = action[0]
+    return slice_action_chunk(action, n_action_steps)
 
 
 def resolve_test_start_seed(requested: int, cfg: Any) -> int:

@@ -23,7 +23,14 @@ from pathlib import Path
 import numpy as np
 import zarr
 
-from soda.option_discovery.supervised.pusht.heuristics import SKILL_NAMES, label_skills
+from soda.option_discovery.supervised.pusht.heuristics import (
+    SKILL_NAMES,
+    label_skills,
+    validate_skill_labels,
+)
+from soda.option_discovery.supervised.pusht.visualize_labels import (
+    print_label_and_segment_stats,
+)
 
 # Columbia DP Push-T replay (Google Drive — download manually, see README).
 GDRIVE_URL = (
@@ -75,11 +82,10 @@ def load_flat_dataset(zip_path: Path) -> dict[str, np.ndarray]:
     return dataset
 
 
-def _print_label_distribution(labels: np.ndarray) -> None:
-    unique, counts = np.unique(labels, return_counts=True)
-    print("Label distribution:")
-    for u, c in zip(unique, counts):
-        print(f"  {u} ({SKILL_NAMES.get(int(u), '?')}): {c}")
+def _print_label_distribution(
+    labels: np.ndarray, episode_ends: np.ndarray
+) -> None:
+    print_label_and_segment_stats(labels, episode_ends, SKILL_NAMES)
 
 
 def _labeling_payload_from_state(
@@ -102,7 +108,8 @@ def update_supervised_labels(output_dir: Path) -> None:
     episode_ends = np.asarray(root["meta"]["episode_ends"][:], dtype=np.int32)
 
     labels = label_skills(_labeling_payload_from_state(state, episode_ends))
-    _print_label_distribution(labels)
+    validate_skill_labels(labels)
+    _print_label_distribution(labels, episode_ends)
 
     data = root["data"]
     if "option_id_supervised" in data:
@@ -130,7 +137,8 @@ def write_pusht_zarr(dataset: dict[str, np.ndarray], output_dir: Path) -> None:
     state[:, 4] = np.deg2rad(state[:, 4])
 
     labels = label_skills(dataset)
-    _print_label_distribution(labels)
+    validate_skill_labels(labels)
+    _print_label_distribution(labels, episode_ends)
 
     store = zarr.DirectoryStore(str(output_dir))
     root = zarr.group(store=store, overwrite=True)

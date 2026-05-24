@@ -218,6 +218,9 @@ __marimo__/
 .streamlit/secrets.toml
 
 # --- SODA-project ---
+# Personal runbook (optional local notes; not shared in git)
+training_plan.md
+
 # Course assignment reference copies (Modal patterns); not part of SODA deliverables
 assignment1/
 assignment2/
@@ -232,3 +235,7 @@ experiments/*
 !experiments/README.md
 data/raw/square/
 pushT_options_labeled/
+
+# IDE and Assistant configs
+.cursor/
+CLAUDE.md

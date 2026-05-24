@@ -83,19 +83,25 @@ conda activate soda
 modal run modal/modal_smoke.py          # infrastructure smoke test
 modal run modal/modal_download_dp.py    # one-time frozen DP ckpt on Volume
 modal run modal/modal_eval.py --checkpoint /experiments/dp_baselines/pusht_image_cnn_train0/latest.ckpt
-# modal run modal/modal_train_low.py ...   (when train_low.py is implemented)
+modal run modal/modal_train_low.py --config-name soda_supervised
+modal run modal/modal_train_high.py --config-name soda_supervised \
+  train_high.low_checkpoint=/experiments/train_low/pusht_soda_supervised/best.ckpt
 ```
 
 See [`project_plan.md` §7 row 5](project_plan.md).
 
 ### 4. Development
 
-Implementation status and next steps: [`project_plan.md` §7 Execution runbook](project_plan.md).
+Implementation status and next steps: [`project_plan.md` §7 Execution runbook](project_plan.md). Active training runbook: [`training_plan.md`](training_plan.md).
 
 ```bash
-# Example (once training is implemented)
-# python soda/training/train_low.py --config-path configs/pusht --config-name soda_supervised
+# Local (conda activate soda)
+python soda/training/train_low.py  --config-path configs/pusht --config-name soda_supervised
+python soda/training/train_high.py --config-path configs/pusht --config-name soda_supervised \
+  train_high.low_checkpoint=experiments/train_low/soda_supervised/best.ckpt
 ```
+
+Push-T E1 uses **3 skills** (option ids **0–2**). Regenerate labels after heuristic changes: [`soda/option_discovery/supervised/pusht/README.md`](soda/option_discovery/supervised/pusht/README.md).
 
 ## Submodule pins
 

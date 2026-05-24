@@ -6,7 +6,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-OUT_DIR="experiments/pusht/dp_baseline"
+OUT_DIR="experiments/pusht/dp_frozen"
 mkdir -p "$OUT_DIR"
 
 BASE="https://diffusion-policy.cs.columbia.edu/data/experiments/image/pusht/diffusion_policy_cnn/train_0/checkpoints"

@@ -3,7 +3,9 @@ Descriptive directory names for sim eval runs on the experiments volume.
 
 Pattern (underscore-separated)::
 
-    {task}_{policy}_h{H}_{regime}_{smoke5|full50|n{N}}_ckpt-{slug}_t{steps}[_seed{S}]_utc{YYYYMMDD-HHMMSS}
+    {task}_{policy}_h{H}_{smoke5|full50|n{N}}_ckpt-{slug}_t{steps}[_seed{S}]_utc{YYYYMMDD-HHMMSS}
+
+``H`` is ``n_action_steps`` (8 = receding-horizon P0 default; 1 = closed-loop ablation).
 
 Full checkpoint path is stored in ``eval_log.json``, not in the folder name.
 """
@@ -16,7 +18,7 @@ from pathlib import Path
 from typing import Literal
 
 TaskName = Literal["pusht", "square"]
-PolicyLabel = Literal["diffusion_policy", "soda_supervised", "soda_unsupervised"]
+PolicyLabel = Literal["dp_frozen", "dp", "soda_supervised", "soda_unsupervised"]
 
 DEFAULT_TEST_START_SEED = 10000
 DEFAULT_MAX_STEPS = 300
@@ -27,9 +29,17 @@ _FROZEN_DP_DIR_MARKERS = ("dp_baselines", "pusht_image_cnn_train0")
 def policy_label_from_config(
     policy_source: str,
     soda_config_name: str = "soda_supervised",
-) -> PolicyLabel:
-    if policy_source == "dp_baseline":
-        return "diffusion_policy"
+    *,
+    fixed_option_id: int | None = None,
+) -> PolicyLabel | str:
+    if policy_source in ("dp_frozen", "dp_baseline"):
+        return "dp_frozen"
+    if policy_source == "dp":
+        return "dp"
+    if policy_source == "soda_low":
+        if fixed_option_id is not None:
+            return f"soda_low_o{int(fixed_option_id)}"
+        return "soda_low"
     if policy_source == "soda":
         if soda_config_name == "soda_unsupervised":
             return "soda_unsupervised"
@@ -84,8 +94,7 @@ def build_eval_run_dir_name(
     *,
     task: TaskName,
     policy_label: PolicyLabel | str,
-    action_horizon: int,
-    regime: str,
+    n_action_steps: int,
     n_test: int,
     max_steps: int,
     checkpoint: Path,
@@ -100,8 +109,7 @@ def build_eval_run_dir_name(
     parts = [
         _sanitize_token(task),
         _sanitize_token(str(policy_label)),
-        f"h{int(action_horizon)}",
-        _sanitize_token(regime),
+        f"h{int(n_action_steps)}",
         _eval_size_token(int(n_test)),
         f"ckpt-{checkpoint_slug(checkpoint, ckpt_slug)}",
         f"t{int(max_steps)}",
@@ -112,33 +120,3 @@ def build_eval_run_dir_name(
     return "_".join(parts)
 
 
-def build_eval_output_dir(
-    experiments_root: Path,
-    *,
-    task: TaskName,
-    policy_source: str,
-    soda_config_name: str,
-    action_horizon: int,
-    regime: str,
-    n_test: int,
-    max_steps: int,
-    checkpoint: Path,
-    ckpt_slug: str | None = None,
-    test_start_seed: int = DEFAULT_TEST_START_SEED,
-    timestamp: datetime | None = None,
-) -> Path:
-    """``{experiments_root}/eval/{task}/{run_dir_name}/``"""
-    policy_label = policy_label_from_config(policy_source, soda_config_name)
-    name = build_eval_run_dir_name(
-        task=task,
-        policy_label=policy_label,
-        action_horizon=action_horizon,
-        regime=regime,
-        n_test=n_test,
-        max_steps=max_steps,
-        checkpoint=checkpoint,
-        ckpt_slug=ckpt_slug,
-        test_start_seed=test_start_seed,
-        timestamp=timestamp,
-    )
-    return Path(experiments_root) / "eval" / task / name

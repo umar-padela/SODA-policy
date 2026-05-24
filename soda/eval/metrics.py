@@ -12,7 +12,16 @@ from typing import Any, Sequence
 import numpy as np
 
 # Step indices (1-based episode steps) for prefix max-overlap reporting.
-DEFAULT_OVERLAP_CHECKPOINTS: tuple[int, ...] = (150, 200, 250, 300)
+DEFAULT_OVERLAP_CHECKPOINTS: tuple[int, ...] = (
+    125,
+    150,
+    175,
+    200,
+    225,
+    250,
+    275,
+    300,
+)
 
 # Per-episode success only (not reported in aggregate). Matches diffusion_policy
 # PushTEnv: coverage ratio > 0.95 counts as success.
@@ -41,6 +50,13 @@ class EpisodeMetrics:
 def step_rewards_to_overlap_pct(step_rewards: Sequence[float]) -> np.ndarray:
     """Convert per-step reward (coverage ratio in [0,1]) to overlap %."""
     return np.asarray(step_rewards, dtype=np.float64) * 100.0
+
+
+def score_std_over_episodes(values_pct: Sequence[float]) -> float:
+    """Sample std of overlap % across episodes, returned on 0–1 scale (like ``mean_score``)."""
+    if len(values_pct) <= 1:
+        return 0.0
+    return float(np.std(values_pct, ddof=1)) / 100.0
 
 
 def compute_episode_metrics(
@@ -84,7 +100,7 @@ def aggregate_episode_metrics(
     *,
     checkpoints: Sequence[int] = DEFAULT_OVERLAP_CHECKPOINTS,
 ) -> dict[str, Any]:
-    """Mean metrics over episodes; also reports DP-style ``test/mean_score`` (0–1)."""
+    """Mean/std metrics over episodes; also reports DP-style ``test/mean_score`` (0–1)."""
     if not episodes:
         raise ValueError("aggregate_episode_metrics requires at least one episode")
 
@@ -97,10 +113,12 @@ def aggregate_episode_metrics(
     out: dict[str, Any] = {
         "n_episodes": len(pool),
         "mean_score": mean_full_pct / 100.0,  # 0–1, DP-compatible
+        "std_score": score_std_over_episodes(full_maxes),
     }
     for t in checkpoints:
         vals = [e.max_overlap_at_step.get(int(t), 0.0) for e in pool]
         out[f"mean_score@{t}"] = float(np.mean(vals)) / 100.0
+        out[f"std_score@{t}"] = score_std_over_episodes(vals)
 
     # Per-episode detail for debugging / plotting
     out["episodes"] = [e.to_dict() for e in episodes]

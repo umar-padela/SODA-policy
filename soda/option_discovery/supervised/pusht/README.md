@@ -2,6 +2,8 @@
 
 Heuristic option labels → `data/raw/pusht/pusht.zarr` (`option_id_supervised`).
 
+Skills (contiguous ids **0–2**): **REPOSITION**, **LINEAR-PUSH**, **PIVOT-PUSH**. Training expects all three ids present (`num_options=3`).
+
 ## 1. Download Columbia replay zip (once)
 
 Browser: https://drive.google.com/uc?id=1KY1InLurpMvJDRb14L9NlXT_fEsCvVUq&confirm=t
@@ -38,5 +40,9 @@ python -m soda.option_discovery.supervised.pusht.play_episode --episode 0 --open
 
 python -m soda.option_discovery.supervised.pusht.check_pipeline
 ```
+
+`visualize_labels` prints **frame counts** and **training segment counts** per skill (one segment = one π_high / π_low sample). `check_pipeline` verifies ids `{0,1,2}`, relabel consistency, and smoke-tests video export.
+
+`build_zarr` validates contiguous skill ids after relabeling.
 
 Optional [Colab](https://colab.research.google.com/github/umar-padela/SODA-policy/blob/dev_umar/data/pusht/pushT_labeling.ipynb) for interactive threshold tuning (not in repo).

@@ -32,37 +32,15 @@ DEFAULT_LABEL_KEY = "option_id_supervised"
 SegmentRecord = tuple[int, int, int, int]  # ep_idx, length, frame_start, frame_end
 
 
-def visualize_labels(
+def index_option_segments(
     labels: np.ndarray,
     episode_ends: np.ndarray,
-    skill_names: Mapping[int, str] | None = None,
-    *,
-    show: bool = True,
-    save_path: Path | None = None,
-) -> None:
-    """
-    Aggregate stats, segment-length tables, short/long episode reports, histograms.
-    """
-    skill_names = skill_names or SKILL_NAMES
-    labels = np.asarray(labels, dtype=np.int32)
-    episode_ends = np.asarray(episode_ends, dtype=np.int32)
-
-    total_points = len(labels)
-    counts = Counter(labels.tolist())
-
-    print("--- GLOBAL AGGREGATES ---")
-    print(f"{'Skill':<15} | {'Points':<10} | {'Percentage':<10}")
-    print("-" * 40)
-    for s_id, name in skill_names.items():
-        count = counts.get(s_id, 0)
-        percent = (count / total_points) * 100 if total_points else 0.0
-        print(f"{name:<15} | {count:<10} | {percent:>8.2f}%")
-    print("-" * 40)
-    print(f"{'TOTAL':<15} | {total_points:<10} | 100.00%\n")
-
-    lengths: dict[int, list[int]] = {0: [], 1: [], 2: [], 3: []}
-    starts: dict[int, list[int]] = {0: [], 1: [], 2: [], 3: []}
-    segment_map: dict[int, list[SegmentRecord]] = {1: [], 2: [], 3: []}
+    skill_ids: list[int],
+) -> tuple[dict[int, list[int]], dict[int, list[int]], dict[int, list[SegmentRecord]]]:
+    """Contiguous same-skill runs per episode (matches training segment index)."""
+    lengths: dict[int, list[int]] = {s_id: [] for s_id in skill_ids}
+    starts: dict[int, list[int]] = {s_id: [] for s_id in skill_ids}
+    segment_map: dict[int, list[SegmentRecord]] = {s_id: [] for s_id in skill_ids}
 
     start_idx = 0
     for ep_idx, ep_end in enumerate(episode_ends):
@@ -82,22 +60,94 @@ def visualize_labels(
             else:
                 lengths[current_skill].append(current_len)
                 starts[current_skill].append(current_segment_start)
-                if current_skill in segment_map:
-                    segment_map[current_skill].append(
-                        (ep_idx, current_len, current_segment_start, i - 1)
-                    )
+                segment_map[current_skill].append(
+                    (ep_idx, current_len, current_segment_start, i - 1)
+                )
                 current_skill = label
                 current_len = 1
                 current_segment_start = i
 
         lengths[current_skill].append(current_len)
         starts[current_skill].append(current_segment_start)
-        if current_skill in segment_map:
-            segment_map[current_skill].append(
-                (ep_idx, current_len, current_segment_start, len(ep_labels) - 1)
-            )
+        segment_map[current_skill].append(
+            (ep_idx, current_len, current_segment_start, len(ep_labels) - 1)
+        )
 
         start_idx = ep_end
+
+    return lengths, starts, segment_map
+
+
+def print_label_and_segment_stats(
+    labels: np.ndarray,
+    episode_ends: np.ndarray,
+    skill_names: Mapping[int, str] | None = None,
+) -> None:
+    """Print per-skill frame counts and training segment counts (pi_high / pi_low samples)."""
+    skill_names = skill_names or SKILL_NAMES
+    labels = np.asarray(labels, dtype=np.int32)
+    episode_ends = np.asarray(episode_ends, dtype=np.int32)
+    skill_ids = sorted(skill_names.keys())
+
+    total_frames = len(labels)
+    frame_counts = Counter(labels.tolist())
+
+    print("--- FRAME COUNTS (per-timestep labels) ---")
+    print(f"{'Skill':<15} | {'Frames':<10} | {'% Frames':<10}")
+    print("-" * 40)
+    for s_id, name in skill_names.items():
+        count = frame_counts.get(s_id, 0)
+        percent = (count / total_frames) * 100 if total_frames else 0.0
+        print(f"{name:<15} | {count:<10} | {percent:>8.2f}%")
+    print("-" * 40)
+    print(f"{'TOTAL':<15} | {total_frames:<10} | 100.00%\n")
+
+    lengths, _, segment_map = index_option_segments(labels, episode_ends, skill_ids)
+    total_segments = sum(len(lengths[s_id]) for s_id in skill_ids)
+    n_episodes = len(episode_ends)
+
+    print("--- TRAINING EXAMPLES (option segments; one sample per segment) ---")
+    print(
+        f"{'Skill':<15} | {'Segments':<10} | {'% Segs':<8} | "
+        f"{'Episodes':<10} | {'% Eps':<8}"
+    )
+    print("-" * 58)
+    for s_id, name in skill_names.items():
+        n_segs = len(lengths[s_id])
+        seg_pct = (n_segs / total_segments) * 100 if total_segments else 0.0
+        ep_ids = {rec[0] for rec in segment_map[s_id]}
+        n_eps = len(ep_ids)
+        ep_pct = (n_eps / n_episodes) * 100 if n_episodes else 0.0
+        print(
+            f"{name:<15} | {n_segs:<10} | {seg_pct:>6.2f}% | "
+            f"{n_eps:<10} | {ep_pct:>6.2f}%"
+        )
+    print("-" * 58)
+    print(
+        f"{'TOTAL':<15} | {total_segments:<10} | 100.00% | "
+        f"{n_episodes:<10} | 100.00%\n"
+    )
+
+
+def visualize_labels(
+    labels: np.ndarray,
+    episode_ends: np.ndarray,
+    skill_names: Mapping[int, str] | None = None,
+    *,
+    show: bool = True,
+    save_path: Path | None = None,
+) -> None:
+    """
+    Aggregate stats, segment-length tables, short/long episode reports, histograms.
+    """
+    skill_names = skill_names or SKILL_NAMES
+    labels = np.asarray(labels, dtype=np.int32)
+    episode_ends = np.asarray(episode_ends, dtype=np.int32)
+
+    print_label_and_segment_stats(labels, episode_ends, skill_names)
+
+    skill_ids = sorted(skill_names.keys())
+    lengths, starts, segment_map = index_option_segments(labels, episode_ends, skill_ids)
 
     print("--- SEGMENT LENGTH STATISTICS (Frames) ---")
     print(f"{'Skill':<15} | {'Mean':<6} | {'Std':<6} | {'Min':<5} | {'Max':<5}")
@@ -147,22 +197,23 @@ def visualize_labels(
         return unique_report
 
     print("--- EPISODES WITH SHORTEST SEGMENTS ---")
-    for s_id in (1, 2, 3):
+    for s_id in skill_ids:
         name = skill_names[s_id]
         report = _format_episode_report(segment_map[s_id], longest=False)
         print(f"{name:<12}: " + (", ".join(report) if report else "(none)"))
     print("")
 
     print("--- EPISODES WITH LONGEST SEGMENTS ---")
-    for s_id in (1, 2, 3):
+    for s_id in skill_ids:
         name = skill_names[s_id]
         report = _format_episode_report(segment_map[s_id], longest=True)
         print(f"{name:<12}: " + (", ".join(report) if report else "(none)"))
     print("")
 
-    fig, axes = plt.subplots(2, 2, figsize=(12, 8))
-    axes_flat = axes.flatten()
-    colors = ["gray", "blue", "green", "orange"]
+    n_skills = len(skill_ids)
+    fig, axes = plt.subplots(1, n_skills, figsize=(4 * n_skills, 4))
+    axes_flat = np.atleast_1d(axes).flatten()
+    colors = ["blue", "green", "orange"]
 
     for i, (s_id, name) in enumerate(skill_names.items()):
         data = lengths[s_id]
@@ -186,7 +237,7 @@ def visualize_labels(
     else:
         plt.close(fig)
 
-    repo_segments = segment_map.get(1, [])
+    repo_segments = segment_map.get(0, [])
     target = next((seg for seg in repo_segments if seg[1] == 3), None)
     if target is not None:
         print(f"Example 3-frame REPOSITION segment: Ep {target[0]} frames {target[2]}-{target[3]}")

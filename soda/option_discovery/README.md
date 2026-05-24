@@ -4,9 +4,8 @@ Offline pipelines that write option label arrays into task zarrs (`option_id_sup
 
 | Subfolder | Role |
 |-----------|------|
-| `supervised/pusht/` | Push-T heuristic labeling + zarr build |
-| `supervised/square/` | Square VLM labeling placeholder (E2; see folder README) |
-| `unsupervised/` | LOVE adapter (E3/E4) |
+| [`supervised/`](supervised/README.md) | Heuristic (Push-T) + VLM placeholder (Square) |
+| [`unsupervised/`](unsupervised/README.md) | LOVE adapter → unsupervised labels |
 
 ## Push-T supervised labels (E1)
 
@@ -15,7 +14,7 @@ Offline pipelines that write option label arrays into task zarrs (`option_id_sup
 python -m soda.option_discovery.supervised.pusht.build_zarr --force   # first build
 python -m soda.option_discovery.supervised.pusht.build_zarr             # relabel only if zarr exists
 
-# Sanity-check labels (stats + segment histograms)
+# Sanity-check labels (stats + segment histograms; frame + segment counts per skill)
 python -m soda.option_discovery.supervised.pusht.visualize_labels
 python -m soda.option_discovery.supervised.pusht.visualize_labels --save figures/pusht_labels.png --no-show
 

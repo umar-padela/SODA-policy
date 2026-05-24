@@ -1,7 +1,5 @@
 """
 Legacy Push-T rollouts (custom loop). Prefer ``dp_runner`` / ``soda_runner``.
-
-Kept for reference and optional open-loop experiments until fully ported.
 """
 
 from __future__ import annotations
@@ -17,12 +15,7 @@ from soda.eval.metrics import (
     aggregate_episode_metrics,
 )
 from soda.eval.policy_loaders import DPEvalSettings, PushTPolicy
-from soda.inference.control_regimes import (
-    ControlParams,
-    ControlRegime,
-    extract_execute_actions,
-    resolve_control_params,
-)
+from soda.eval.runner_common import extract_env_action_chunk
 
 ProgressMode = Literal["none", "log", "tqdm"]
 
@@ -81,7 +74,7 @@ def make_pusht_eval_env(
     settings: DPEvalSettings,
     *,
     seed: int,
-    control: ControlParams,
+    n_action_steps: int,
     legacy_test: bool | None = None,
     max_steps: int | None = None,
 ):
@@ -96,7 +89,7 @@ def make_pusht_eval_env(
     env = MultiStepWrapper(
         PushTImageEnv(legacy=legacy, render_size=96),
         n_obs_steps=settings.n_obs_steps,
-        n_action_steps=control.action_horizon,
+        n_action_steps=int(n_action_steps),
         max_episode_steps=horizon,
     )
     env.seed(seed)
@@ -124,12 +117,27 @@ def _obs_to_torch(obs: dict, policy: PushTPolicy) -> dict:
     return out
 
 
+def _actions_for_env(
+    action_dict: dict[str, Any],
+    n_action_steps: int,
+    *,
+    env_action_dim: int = 2,
+) -> np.ndarray:
+    """Slice receding window from native (π_low) or DP ``action`` for the sim env."""
+    return extract_env_action_chunk(
+        action_dict,
+        n_action_steps,
+        env_action_dim=env_action_dim,
+        squeeze_batch=True,
+    )
+
+
 def rollout_episode(
     policy: PushTPolicy,
     env,
     *,
     seed: int,
-    control: ControlParams,
+    n_action_steps: int,
     prefix: str = "test/",
     checkpoints: tuple[int, ...] = DEFAULT_OVERLAP_CHECKPOINTS,
     max_steps: int | None = None,
@@ -139,10 +147,7 @@ def rollout_episode(
     """
     Run one episode and return overlap metrics at step checkpoints.
 
-    Receding: replan after each executed chunk (fresh obs); set
-    ``action_horizon=1`` for per-step replanning.
-    Open: one ``predict_action`` at reset, then execute the full chunk without
-    further replanning (classic open-loop baseline).
+    Replan after each ``predict_action`` chunk (``n_action_steps=1`` = closed-loop).
     """
     from soda.eval.metrics import compute_episode_metrics
 
@@ -190,28 +195,17 @@ def rollout_episode(
                 _log_step_progress(desc, n, step_budget, reward)
                 last_logged_step = n
 
-    if control.regime == "open":
+    while not done:
         obs_dict = _obs_to_torch(obs, policy)
         import torch
 
         with torch.no_grad():
             action_dict = policy.predict_action(obs_dict)
-        action = extract_execute_actions(action_dict, control)
+
+        action = _actions_for_env(action_dict, n_action_steps)
         obs, _reward, done, _info = env.step(action)
         done = bool(done)
         _sync_step_progress()
-    else:
-        while not done:
-            obs_dict = _obs_to_torch(obs, policy)
-            import torch
-
-            with torch.no_grad():
-                action_dict = policy.predict_action(obs_dict)
-
-            action = extract_execute_actions(action_dict, control)
-            obs, _reward, done, _info = env.step(action)
-            done = bool(done)
-            _sync_step_progress()
 
     if step_pbar is not None:
         step_pbar.close()
@@ -220,7 +214,6 @@ def rollout_episode(
         if n != last_logged_step:
             _log_step_progress(desc, n, step_budget, float(env.reward[-1]))
 
-    # One reward per sim step (do not re-extend the growing wrapper list each loop).
     step_rewards = list(env.reward)
 
     return compute_episode_metrics(
@@ -240,8 +233,7 @@ def run_pusht_rollouts(
     n_train: int = 0,
     train_start_seed: int = 0,
     max_steps: int | None = None,
-    regime: ControlRegime = "receding",
-    action_horizon: int = 1,
+    n_action_steps: int = 1,
     checkpoints: tuple[int, ...] = DEFAULT_OVERLAP_CHECKPOINTS,
     show_progress: bool = True,
 ) -> dict[str, Any]:
@@ -249,15 +241,8 @@ def run_pusht_rollouts(
     Roll out ``policy`` on Push-T and aggregate metrics.
 
     Default seeds match DP ``PushTImageRunner`` (test from 10000).
-    Default ``action_horizon=1``: replan every sim step. Policy chunk length
-    is fixed by the checkpoint (DP horizon 16) or SODA at runtime.
+    Default ``n_action_steps=1``: replan every sim step.
     """
-    control = resolve_control_params(
-        regime=regime,
-        n_obs_steps=settings.n_obs_steps,
-        action_horizon=action_horizon,
-    )
-
     episodes: list[EpisodeMetrics] = []
     progress_mode = _resolve_progress_mode(show_progress)
 
@@ -278,13 +263,16 @@ def run_pusht_rollouts(
             if progress_mode == "log":
                 print(f"[pusht eval] starting {ep_label}", flush=True)
             env = make_pusht_eval_env(
-                settings, seed=seed, control=control, max_steps=max_steps
+                settings,
+                seed=seed,
+                n_action_steps=n_action_steps,
+                max_steps=max_steps,
             )
             ep = rollout_episode(
                 policy,
                 env,
                 seed=seed,
-                control=control,
+                n_action_steps=n_action_steps,
                 prefix=prefix,
                 checkpoints=checkpoints,
                 max_steps=max_steps,
@@ -305,8 +293,7 @@ def run_pusht_rollouts(
     _run_split(n_test, test_start_seed, "test/")
 
     summary = aggregate_episode_metrics(episodes, checkpoints=checkpoints)
-    summary["regime"] = regime
-    summary["action_horizon"] = control.action_horizon
+    summary["n_action_steps"] = int(n_action_steps)
     summary["policy_horizon"] = settings.policy_horizon
     summary["max_steps"] = max_steps or settings.max_steps
     summary["n_test"] = n_test

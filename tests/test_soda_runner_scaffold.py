@@ -27,7 +27,6 @@ def test_build_soda_pusht_runner_requires_diffusion_policy_submodule():
         Path("/tmp/soda_eval_test"),
         n_test=1,
         n_test_vis=0,
-        n_action_steps=1,
         max_steps=10,
         test_start_seed=100000,
     )

@@ -6,18 +6,29 @@ from typing import Any, Mapping
 
 import numpy as np
 
-# Skill ids: 0 STATIONARY, 1 REPOSITION, 2 LINEAR-PUSH, 3 PIVOT-PUSH
+# Skill ids: 0 REPOSITION, 1 LINEAR-PUSH, 2 PIVOT-PUSH
 GRIPPER_MOVE_THRESHOLD = 0.01
 BLOCK_MOVE_THRESHOLD = 0.2
 BLOCK_ROT_THRESHOLD = 0.1
 PIVOT_AVG_THRESHOLD = 1.0
 
 SKILL_NAMES = {
-    0: "STATIONARY",
-    1: "REPOSITION",
-    2: "LINEAR-PUSH",
-    3: "PIVOT-PUSH",
+    0: "REPOSITION",
+    1: "LINEAR-PUSH",
+    2: "PIVOT-PUSH",
 }
+
+
+def validate_skill_labels(labels: np.ndarray) -> None:
+    """Ensure labels use every skill id in ``SKILL_NAMES`` contiguously from 0."""
+    labels = np.asarray(labels, dtype=np.int32)
+    unique = sorted(int(u) for u in np.unique(labels))
+    expected = sorted(SKILL_NAMES.keys())
+    if unique != expected:
+        raise ValueError(
+            f"Expected skill ids {expected} ({[SKILL_NAMES[i] for i in expected]}), "
+            f"got {unique}"
+        )
 
 
 def label_skills(raw_data: Mapping[str, Any]) -> np.ndarray:
@@ -48,8 +59,8 @@ def label_skills(raw_data: Mapping[str, Any]) -> np.ndarray:
             b_moving = (b_vels[i] > BLOCK_MOVE_THRESHOLD) or (
                 b_rot_vels[i] > BLOCK_ROT_THRESHOLD
             )
-            if g_moving:
-                ep_labels[i] = 1 if not b_moving else -1
+            if g_moving and b_moving:
+                ep_labels[i] = -1
             else:
                 ep_labels[i] = 0
 
@@ -62,9 +73,9 @@ def label_skills(raw_data: Mapping[str, Any]) -> np.ndarray:
                 seg_end = i
                 if seg_end > seg_start + 1:
                     avg_rot = np.mean(b_rot_vels[seg_start : seg_end - 1])
-                    skill = 3 if avg_rot >= PIVOT_AVG_THRESHOLD else 2
+                    skill = 2 if avg_rot >= PIVOT_AVG_THRESHOLD else 1
                 else:
-                    skill = 2
+                    skill = 1
                 ep_labels[seg_start:seg_end] = skill
             else:
                 i += 1

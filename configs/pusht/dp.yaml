@@ -1,0 +1,93 @@
+# Vanilla Diffusion Policy — Push-T image CNN (train + eval from this file only).
+#
+# Train (Columbia workspace via soda/training/train_dp.py):
+#   modal run modal/modal_train_dp.py
+#   python soda/training/train_dp.py --config-path configs/pusht --config-name dp
+#
+# Eval (same yaml; checkpoint from train or --checkpoint override):
+#   modal run modal/modal_eval.py --config configs/pusht/dp.yaml
+#   modal run modal/modal_eval.py --config configs/pusht/dp.yaml --full
+
+name: dp  # [train+eval] experiment id; default output under experiments/train_dp/dp/
+
+# --- Layout (Columbia DP protocol) ---
+n_obs_steps: 2  # [train+eval] observation history length (frames + agent_pos)
+n_action_steps: 8  # [eval] receding-horizon execute window before replan (inference only)
+horizon: 16  # [train+eval] U-Net predicts this many action steps per diffusion sample
+past_action_visible: false  # [train+eval] Push-T: no past-action channel in obs
+obs_as_global_cond: true  # [train+eval] encode obs as global_cond (hybrid image policy)
+
+task:
+  name: pusht_image  # [train+eval] Columbia task id
+  env_runner:  # [eval] sim rollout settings (modal_eval / dp_runner)
+    legacy_test: true  # [eval] match Columbia Push-T test layout
+    test_start_seed: 100000  # [eval] env seed offset for test episodes
+    max_steps: 300  # [eval] episode step budget for overlap scoring
+    fps: 10  # [eval] video export framerate
+    crf: 22  # [eval] video compression quality
+    render_size: 96  # [eval] env render resolution (px)
+    tqdm_interval_sec: 5.0  # [eval] progress bar update interval
+  dataset:  # [train] dataloader (Columbia PushTImageDataset)
+    zarr_path: data/raw/pusht/pusht.zarr  # [train] demo zarr path
+    val_ratio: 0.02  # [train] episode-level validation split fraction
+    seed: 42  # [train] split reproducibility
+    max_train_episodes: 90  # [train] cap training demos (Columbia default)
+    pad_before: 1  # [train] = n_obs_steps - 1 (dataloader padding)
+    pad_after: 7  # [train] = Columbia train execute window - 1 (8-1); not eval replan
+    num_workers: 8  # [train] DataLoader workers
+
+policy:  # [train+eval] DiffusionUnetHybridImagePolicy architecture
+  _target_: diffusion_policy.policy.diffusion_unet_hybrid_image_policy.DiffusionUnetHybridImagePolicy  # [train] Hydra class
+  crop_shape: [84, 84]  # [train+eval] Push-T hybrid crop (96 render → 84)
+  num_inference_steps: 100  # [train+eval] DDPM denoising steps at inference
+  diffusion_step_embed_dim: 128  # [train+eval] U-Net time embedding dim
+  down_dims: [512, 1024, 2048]  # [train+eval] U-Net channel pyramid
+  kernel_size: 5  # [train+eval] 1D conv kernel in U-Net
+  n_groups: 8  # [train+eval] GroupNorm groups in U-Net
+  cond_predict_scale: true  # [train+eval] FiLM scale in conditional blocks
+  eval_fixed_crop: true  # [train+eval] fixed crop at eval (Columbia default)
+  obs_encoder_group_norm: true  # [train+eval] GroupNorm on ResNet backbone
+
+noise_scheduler:  # [train+eval] DDPM schedule (diffusers DDPMScheduler)
+  num_train_timesteps: 100  # [train+eval] diffusion training timesteps
+  beta_start: 0.0001  # [train+eval] noise schedule start
+  beta_end: 0.02  # [train+eval] noise schedule end
+  beta_schedule: squaredcos_cap_v2  # [train+eval] variance schedule shape
+  clip_sample: true  # [train+eval] clip denoised samples
+  prediction_type: epsilon  # [train+eval] predict noise (DDPM)
+  variance_type: fixed_small  # [train+eval] Columbia DDPMScheduler default
+
+train_dp:  # [train] Columbia TrainDiffusionUnetHybridWorkspace loop
+  _target_: diffusion_policy.workspace.train_diffusion_unet_hybrid_workspace.TrainDiffusionUnetHybridWorkspace  # [train] workspace class
+  device: cuda:0  # [train] training device
+  seed: 42  # [train] RNG seed
+  num_epochs: 3050  # [train] Columbia official epoch count
+  batch_size: 64  # [train] batch size
+  lr: 1.0e-4  # [train] learning rate
+  weight_decay: 1.0e-6  # [train] weight decay
+  use_ema: true  # [train] EMA weights saved for eval
+  checkpoint_every: 50  # [train] checkpoint save interval (epochs)
+  rollout_every: 50  # [train] sim rollout interval during training
+  val_every: 1  # [train] validation interval (epochs)
+  output_dir: null  # [train] null → experiments/train_dp/dp/ (Modal: /experiments/train_dp/dp/)
+  wandb_enabled: true  # [train] Weights & Biases logging (Columbia logging.mode=online)
+  wandb_project: soda-train-dp  # [train] W&B project name
+
+optimizer:  # [train] AdamW (Columbia Hydra optimizer block)
+  _target_: torch.optim.AdamW  # [train] optimizer class
+  lr: 1.0e-4  # [train] learning rate
+  betas: [0.95, 0.999]  # [train] Adam betas
+  eps: 1.0e-8  # [train] Adam epsilon
+  weight_decay: 1.0e-6  # [train] weight decay
+
+checkpoint:  # [eval] path to trained weights for modal_eval
+  volume_path: null  # [eval] e.g. /experiments/train_dp/dp/latest.ckpt (auto-set after Modal train)
+
+eval:  # [eval] modal_eval regime (smoke vs full)
+  wandb_enabled: true  # [eval] log overlap metrics (+ videos) to W&B
+  wandb_project: soda-eval  # [eval] W&B project name
+  policy: dp  # [eval] self-trained vanilla DP (not frozen Columbia)
+  smoke:  # [eval] default unless --full
+    n_test: 5  # [eval] quick sanity episode count
+  full:  # [eval] activated with --full
+    n_test: 50  # [eval] full benchmark episode count

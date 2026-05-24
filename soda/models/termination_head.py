@@ -5,13 +5,6 @@ Termination head β_ω(s) for π_low (project_plan §2, §7 row 19).
 from β into the diffusion U-Net (locked in §8).
 
 Used by ``LowPolicy`` and ``losses_low.termination_bce_loss``.
-
-Upstream context
-----------------
-Diffusion Policy's ``ConditionalUnet1D`` processes the full action horizon; the
-**bottleneck** (mid U-Net features) summarizes the current denoising step + context.
-We read that tensor once per loss forward, ``detach`` before the MLP, and train β
-without moving U-Net weights on the termination objective.
 """
 
 from __future__ import annotations
@@ -48,27 +41,27 @@ class TerminationHead(nn.Module):
     Inference
     ---------
     ``HierarchicalController`` compares ``sigmoid(logit)`` to ``beta_transition`` (§8E).
-
-    Architecture (TODO §7 row 19)
-    -----------------------------
-    ::
-
-        bottleneck (B, bottleneck_dim)  --detach-->  Linear → Mish → … → Linear(1)
-                                                      → logit (B,)
     """
 
     def __init__(self, cfg: TerminationHeadConfig) -> None:
         super().__init__()
         self.cfg = cfg
-        # TODO §7 row 19:
-        # if cfg.num_layers < 1:
-        #     raise ValueError(f"num_layers must be >= 1, got {cfg.num_layers}")
-        # layers: list[nn.Module] = [nn.Linear(cfg.bottleneck_dim, cfg.hidden_dim), nn.Mish()]
-        # for _ in range(cfg.num_layers - 1):
-        #     layers += [nn.Linear(cfg.hidden_dim, cfg.hidden_dim), nn.Mish()]
-        # layers.append(nn.Linear(cfg.hidden_dim, 1))
-        # self.mlp = nn.Sequential(*layers)
-        raise NotImplementedError("TODO §7 row 19: TerminationHead.__init__")
+        if cfg.num_layers < 1:
+            raise ValueError(f"num_layers must be >= 1, got {cfg.num_layers}")
+
+        layers: list[nn.Module] = [
+            nn.Linear(cfg.bottleneck_dim, cfg.hidden_dim),
+            nn.Mish(),
+        ]
+        for _ in range(cfg.num_layers - 1):
+            layers.extend(
+                [
+                    nn.Linear(cfg.hidden_dim, cfg.hidden_dim),
+                    nn.Mish(),
+                ]
+            )
+        layers.append(nn.Linear(cfg.hidden_dim, 1))
+        self.mlp = nn.Sequential(*layers)
 
     def forward(self, bottleneck: torch.Tensor, *, stop_grad: bool = True) -> torch.Tensor:
         """
@@ -83,46 +76,27 @@ class TerminationHead(nn.Module):
         -------
         logit
             ``(B,)`` pre-sigmoid termination logit.
-
-        TODO §7 row 19
-        --------------
-        - [ ] ``feat = bottleneck.detach() if stop_grad else bottleneck``
-        - [ ] ``return self.mlp(feat).squeeze(-1)``
         """
-        raise NotImplementedError("TODO §7 row 19: TerminationHead.forward")
+        feat = bottleneck.detach() if stop_grad else bottleneck
+        return self.mlp(feat).squeeze(-1)
 
     def predict_beta(self, bottleneck: torch.Tensor) -> torch.Tensor:
-        """
-        Termination probability in ``(0, 1)`` for inference / logging.
-
-        TODO §7 row 19
-        --------------
-        - [ ] ``return torch.sigmoid(self.forward(bottleneck, stop_grad=True))``
-        """
-        raise NotImplementedError("TODO §7 row 19: TerminationHead.predict_beta")
+        """Termination probability in ``(0, 1)`` for inference / logging."""
+        return torch.sigmoid(self.forward(bottleneck, stop_grad=True))
 
 
 def termination_bce_from_logits(
     logit: torch.Tensor,
     beta_label: torch.Tensor,
+    *,
+    pos_weight: float | torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """
-    BCE with logits (shared helper for ``TerminationHead`` and ``losses_low``).
-
-    Parameters
-    ----------
-    logit
-        ``(B,)`` or ``(B, 1)``
-    beta_label
-        ``(B,)`` float in ``{0, 1}`` from ``OptionLabeledZarrDataset`` anchor frame.
-
-    Returns
-    -------
-    Scalar loss.
-
-    TODO §7 row 19
-    --------------
-    - [ ] Flatten logit to ``(B,)``
-    - [ ] ``return F.binary_cross_entropy_with_logits(logit, beta_label.float())``
-    """
-    raise NotImplementedError("TODO §7 row 19: termination_bce_from_logits")
+    """BCE with logits (shared helper for ``TerminationHead`` and ``losses_low``)."""
+    if logit.ndim > 1:
+        logit = logit.squeeze(-1)
+    kwargs: dict[str, torch.Tensor] = {}
+    if pos_weight is not None:
+        if not torch.is_tensor(pos_weight):
+            pos_weight = torch.tensor(float(pos_weight), device=logit.device, dtype=logit.dtype)
+        kwargs["pos_weight"] = pos_weight.reshape(1)
+    return F.binary_cross_entropy_with_logits(logit, beta_label.float(), **kwargs)

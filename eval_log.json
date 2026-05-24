@@ -1,0 +1,133 @@
+{
+  "checkpoint": "/experiments/dp_baselines/pusht_image_cnn_train0/latest.ckpt",
+  "checkpoint_slug": "frozen_latest",
+  "config": {
+    "checkpoint_path": "/experiments/dp_baselines/pusht_image_cnn_train0/latest.ckpt",
+    "ckpt_slug": null,
+    "config_name": "dp_frozen",
+    "config_path": "/root/soda-policy/configs/pusht/dp_frozen.yaml",
+    "device": "cuda:0",
+    "fixed_option_id": null,
+    "high_checkpoint": null,
+    "low_checkpoint": null,
+    "max_steps": 300,
+    "n_action_steps": 8,
+    "n_test": 5,
+    "n_test_vis": null,
+    "n_train": 0,
+    "overlap_checkpoints": [
+      150,
+      200,
+      250,
+      300
+    ],
+    "policy_source": "dp_frozen",
+    "record_video": true,
+    "show_progress": true,
+    "task": "pusht",
+    "test_start_seed": 10000,
+    "train_start_seed": 0
+  },
+  "config_name": "dp_frozen",
+  "config_path": "/root/soda-policy/configs/pusht/dp_frozen.yaml",
+  "config_stem": "dp_frozen",
+  "descriptive_run_name": "pusht_dp_frozen_h8_smoke5_ckpt-frozen_latest_t300_utc20260524-033246",
+  "dp_runner_log": {
+    "test/mean_score": 0.97745821880035,
+    "test/sim_max_reward_4300000": 1.0,
+    "test/sim_max_reward_4300001": 0.88729109400175,
+    "test/sim_max_reward_4300002": 1.0,
+    "test/sim_max_reward_4300003": 1.0,
+    "test/sim_max_reward_4300004": 1.0,
+    "test/sim_video_4300000": "/experiments/eval/dp_frozen/20260524/033246/media/dp_frozen_ep00_seed4300000_score100.mp4",
+    "test/sim_video_4300001": "/experiments/eval/dp_frozen/20260524/033246/media/dp_frozen_ep01_seed4300001_score089.mp4",
+    "test/sim_video_4300002": "/experiments/eval/dp_frozen/20260524/033246/media/dp_frozen_ep02_seed4300002_score100.mp4",
+    "test/sim_video_4300003": "/experiments/eval/dp_frozen/20260524/033246/media/dp_frozen_ep03_seed4300003_score100.mp4"
+  },
+  "metrics": {
+    "episodes": [
+      {
+        "max_overlap_at_step": {
+          "150": 88.06800041974988,
+          "200": 95.61058549133335,
+          "250": 100.0,
+          "300": 100.0
+        },
+        "max_overlap_full": 100.0,
+        "n_steps": 217,
+        "prefix": "test/",
+        "seed": 4300000,
+        "success": true
+      },
+      {
+        "max_overlap_at_step": {
+          "150": 42.05147046350597,
+          "200": 66.71896717339216,
+          "250": 84.34157259049904,
+          "300": 88.729109400175
+        },
+        "max_overlap_full": 88.729109400175,
+        "n_steps": 300,
+        "prefix": "test/",
+        "seed": 4300001,
+        "success": false
+      },
+      {
+        "max_overlap_at_step": {
+          "150": 100.0,
+          "200": 100.0,
+          "250": 100.0,
+          "300": 100.0
+        },
+        "max_overlap_full": 100.0,
+        "n_steps": 96,
+        "prefix": "test/",
+        "seed": 4300002,
+        "success": true
+      },
+      {
+        "max_overlap_at_step": {
+          "150": 100.0,
+          "200": 100.0,
+          "250": 100.0,
+          "300": 100.0
+        },
+        "max_overlap_full": 100.0,
+        "n_steps": 79,
+        "prefix": "test/",
+        "seed": 4300003,
+        "success": true
+      },
+      {
+        "max_overlap_at_step": {
+          "150": 31.44585922884236,
+          "200": 100.0,
+          "250": 100.0,
+          "300": 100.0
+        },
+        "max_overlap_full": 100.0,
+        "n_steps": 189,
+        "prefix": "test/",
+        "seed": 4300004,
+        "success": true
+      }
+    ],
+    "mean_score": 0.97745821880035,
+    "mean_score@150": 0.7231306602241965,
+    "mean_score@200": 0.9246591053294511,
+    "mean_score@250": 0.9686831451809981,
+    "mean_score@300": 0.97745821880035,
+    "n_episodes": 5,
+    "video_paths": [
+      "/experiments/eval/dp_frozen/20260524/033246/media/dp_frozen_ep00_seed4300000_score100.mp4",
+      "/experiments/eval/dp_frozen/20260524/033246/media/dp_frozen_ep01_seed4300001_score089.mp4",
+      "/experiments/eval/dp_frozen/20260524/033246/media/dp_frozen_ep02_seed4300002_score100.mp4",
+      "/experiments/eval/dp_frozen/20260524/033246/media/dp_frozen_ep03_seed4300003_score100.mp4"
+    ]
+  },
+  "output_dir": "/experiments/eval/dp_frozen/20260524/033246",
+  "policy_label": "dp_frozen",
+  "policy_source": "dp_frozen",
+  "run_dir_name": "dp_frozen/20260524/033246",
+  "task": "pusht"
+}

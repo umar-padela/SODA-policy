@@ -2,8 +2,9 @@
 Push-T eval for trained SODA (π_high + π_low + β).
 
 Mirrors ``soda.eval.dp_runner``: same Columbia env stack (``PushTImageRunner``),
-``n_action_steps`` slicing, MP4 recording, and overlap metrics. Only the policy
-object and config loader differ.
+MP4 recording, and overlap metrics. Uses **receding-horizon control** — execute
+``n_action_steps`` (default 8) from each cached diffusion plan before replanning,
+matching vanilla DP eval. β is still checked every sim step.
 """
 
 from __future__ import annotations
@@ -18,7 +19,6 @@ import tqdm
 
 from soda.eval.metrics import DEFAULT_OVERLAP_CHECKPOINTS
 from soda.eval.policy_loaders import (
-    SodaEvalSettings,
     _require_diffusion_policy,
     load_soda_policy_and_cfg,
 )
@@ -30,7 +30,6 @@ from soda.eval.runner_common import (
     vector_env_reset,
 )
 from soda.eval.run_naming import DEFAULT_TEST_START_SEED
-from soda.inference.control_regimes import ControlRegime
 
 
 def build_soda_pusht_runner(
@@ -76,7 +75,8 @@ class SodaHierarchicalRunner:
     """
     Thin wrapper around DP ``PushTImageRunner`` env/video stack.
 
-    Calls ``HierarchicalPolicy.predict_action`` instead of a frozen DP checkpoint.
+    Calls ``HierarchicalPolicy.predict_action`` once per sim step; the controller
+    caches diffusion plans and replans every ``n_action_steps`` (unless β fires).
     """
 
     def __init__(
@@ -152,10 +152,7 @@ class SodaHierarchicalRunner:
                     action_dict,
                     lambda x: x.detach().to("cpu").numpy(),
                 )
-                action = slice_action_chunk(
-                    np_action_dict["action"],
-                    self._inner.n_action_steps,
-                )
+                action = slice_action_chunk(np_action_dict["action"], 1)
 
                 obs, _reward, done, _info = env.step(action)
                 done = bool(np.all(done))
@@ -206,29 +203,27 @@ def run_soda_pusht_eval(
     output_dir: Path,
     device: str = "cuda:0",
     config_name: str = "soda_supervised",
-    regime: ControlRegime = "receding",
     n_test: int = 5,
     n_train: int = 0,
     n_test_vis: int | None = None,
     n_train_vis: int = 0,
-    n_action_steps: int = 1,
+    n_action_steps: int = 8,
     max_steps: int = 300,
     test_start_seed: int = DEFAULT_TEST_START_SEED,
     train_start_seed: int = 0,
     record_video: bool = True,
     overlap_checkpoints: tuple[int, ...] = DEFAULT_OVERLAP_CHECKPOINTS,
+    high_checkpoint: Path | None = None,
+    low_checkpoint: Path | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """
     Load SODA checkpoint + yaml, run hierarchical policy in DP env runner.
 
+    ``n_action_steps`` is the eval receding-horizon window (default 8): replan
+    diffusion at most every ``n_action_steps`` sim steps unless β fires earlier.
+
     Returns ``(soda_metrics, runner_log)`` — same contract as ``run_dp_pusht_eval``.
     """
-    if regime == "open":
-        raise NotImplementedError(
-            "Open-loop SODA eval: implement in soda_runner or use legacy "
-            "soda.eval.pusht_rollout until HierarchicalPolicy supports it."
-        )
-
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "media").mkdir(parents=True, exist_ok=True)
@@ -237,6 +232,9 @@ def run_soda_pusht_eval(
         checkpoint,
         device=device,
         config_name=config_name,
+        high_checkpoint=high_checkpoint,
+        low_checkpoint=low_checkpoint,
+        n_action_steps=n_action_steps,
     )
     seed = resolve_test_start_seed(test_start_seed, cfg)
 

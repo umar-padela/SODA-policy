@@ -13,21 +13,24 @@ git submodule update --init --recursive third_party/diffusion_policy
 ## Eval architecture
 
 ```text
-modal run modal/modal_eval.py --checkpoint <path>   # local CLI
+modal run modal/modal_eval.py --config configs/pusht/dp_frozen.yaml
        → eval_run @ Modal GPU
+            → soda/eval/eval_yaml.py  (load yaml → EvalConfig)
             → soda/eval/run_eval.py
-                 → dp_baseline → soda/eval/dp_runner.py
+                 → dp_frozen / dp → soda/eval/dp_runner.py
                  → soda         → soda/eval/soda_runner.py
                       (both → third_party PushTImageRunner + media/*.mp4)
                  → soda/eval/runner_common.py + metrics.py
 ```
 
-**Every eval run requires `--checkpoint`.** `policy` only selects the loader:
+**Every eval run uses `--config` pointing at a yaml file** (`dp_frozen.yaml`, `soda_supervised.yaml`, …).
+Checkpoint paths and eval settings live in that yaml; CLI flags override.
 
-| `policy` | Checkpoint | Backend |
-|----------|------------|---------|
-| `dp_baseline` | Columbia frozen, your retrained DP, etc. | `PushTImageRunner` (`n_action_steps` = `--action-horizon`, default **1**) |
-| `soda` | Trained SODA weights | `pusht_rollout` (TBD) |
+| Config | Policy | Checkpoint source in yaml |
+|--------|--------|----------------------------|
+| `dp_frozen.yaml` | `eval.policy: dp_frozen` | `checkpoint.volume_path` |
+| `dp.yaml` | `eval.policy: dp` | `checkpoint.volume_path` (self-trained) |
+| `soda_supervised.yaml` | `eval.policy: soda` | `inference.high_checkpoint` + `inference.low_checkpoint` |
 
 ## Commands (repo root)
 
@@ -35,19 +38,27 @@ modal run modal/modal_eval.py --checkpoint <path>   # local CLI
 |---------|---------|
 | `modal run modal/modal_smoke.py` | Infra smoke (§7 row 5) |
 | `modal run modal/modal_download_dp.py` | One-time download frozen DP to Volume |
-| `modal run modal/modal_eval.py --checkpoint /experiments/dp_baselines/pusht_image_cnn_train0/latest.ckpt` | DP smoke (5 eps, videos for first 4) |
-| `modal run modal/modal_eval.py --checkpoint .../latest.ckpt --n-test 1 --max-steps 300` | Single episode + full horizon |
-| `modal run modal/modal_eval.py --checkpoint .../latest.ckpt --action-horizon 8` | DP paper-style receding (8 actions per replan) |
-| `modal run modal/modal_eval.py --checkpoint .../latest.ckpt --full` | DP full (50 eps) |
-| `modal run modal/modal_eval.py --checkpoint .../latest.ckpt --no-video` | Skip MP4 recording |
+| `modal run modal/modal_eval.py --config configs/pusht/dp_frozen.yaml` | DP smoke eval (settings from yaml) |
+| `modal run modal/modal_eval.py --config configs/pusht/dp_frozen.yaml --n-test 1` | Single episode + yaml max_steps |
+| `modal run modal/modal_eval.py --config configs/pusht/dp_frozen.yaml --full` | DP full (50 eps from yaml) |
+| `modal run modal/modal_eval.py --config configs/pusht/soda_supervised.yaml` | SODA eval (paths in yaml `inference.*`) |
+| `modal run modal/modal_rollout_low_policy.py --run-readme "..." --episode 100 --option-id 0` | Expert-anchored π_low segment rollout + side-by-side MP4 |
+| `modal run modal/modal_train_low.py` | Train π_low |
+| `modal run modal/modal_train_high.py --low-checkpoint ...` | Train π_high |
+| `modal run modal/modal_train_dp.py` | Train vanilla DP from `configs/pusht/dp.yaml` |
+| `modal run modal/modal_eval.py --config configs/pusht/dp.yaml` | Eval self-trained DP |
 
-Outputs: `/experiments/eval/<task>/<descriptive_run_name>/` on Volume **`soda-experiments`**:
+Outputs: `/experiments/eval/<config_stem>/<YYYYMMDD>/<HHMMSS>/` on Volume **`soda-experiments`**:
 
-- `eval_log.json` — metrics + optional `dp_runner_log`
-- `media/*.mp4` — rollout videos (first `n_test_vis` test episodes, default `min(n_test, 4)`)
+- `config.yaml` — exact yaml snapshot used for the run
+- `run_manifest.json` — invoke command, CLI overrides, resolved eval settings
+- `command.txt` — same invoke command as plain text
+- `eval_log.json` — metrics + optional runner log
+- `media/*.mp4` — rollout videos named `{config_stem}_ep{idx}_seed{seed}_score{pct}.mp4`
 
-Run folder name pattern:  
-`{task}_{policy}_h{H}_{regime}_{smoke5|full50}_ckpt-{slug}_t{steps}_utc{timestamp}`
+Example layout: `eval/dp_frozen/20260525/014851/`
+
+Legacy descriptive name (policy, horizon, checkpoint slug) is stored in `eval_log.json` as `descriptive_run_name`, not in the folder path.
 
 ### Browse / download from Volume (local CLI)
 
@@ -55,17 +66,25 @@ The volume is mounted at `/experiments` **inside** Modal containers only. For `m
 
 ```powershell
 modal volume ls soda-experiments
-modal volume ls soda-experiments eval/pusht
-modal volume get soda-experiments eval/pusht/<run_dir_name>/media/<id>.mp4 rollout.mp4
-```
-
-Example (from a completed eval):
-
-```powershell
-modal volume get soda-experiments eval/pusht/pusht_diffusion_policy_h1_receding_n1_ckpt-frozen_latest_t100_utc20260521-080952/media/6q5rjg5b.mp4 rollout.mp4
+modal volume ls soda-experiments eval/dp_frozen
+modal volume get soda-experiments eval/dp_frozen/20260525/014851/media/dp_frozen_ep00_seed10000_score055.mp4 rollout.mp4
+modal volume get soda-experiments segment_rollout/seg0001_ep100_o0_reposition_anchor12345.mp4 rollout.mp4
 ```
 
 You can also browse files in the [Modal dashboard](https://modal.com/storage) → Volume `soda-experiments`.
+
+Long train/eval jobs use ``Function.spawn()`` instead of ``.remote()`` so work continues
+if the local ``modal run`` client disconnects. Each run prints a ``FunctionCall`` object id;
+monitor progress in the [Modal dashboard](https://modal.com/apps).
+
+## GPUs
+
+| Function | Default GPU | Override env var |
+|----------|-------------|------------------|
+| `smoke`, `download_frozen_dp`, `eval_run` | **A10G** | `MODAL_GPU_EVAL` |
+| `train_low`, `train_high` | **L40S** | `MODAL_GPU_TRAIN` |
+
+Example (Windows): `$env:MODAL_GPU_TRAIN="A100-40GB"; modal run modal/modal_train_low.py`
 
 ## Files
 
@@ -73,6 +92,7 @@ You can also browse files in the [Modal dashboard](https://modal.com/storage) �
 |------|------|
 | `modal_config.py` | `download_frozen_dp`, `eval_run`, `smoke`, `train_*` |
 | `modal_download_dp.py` | CLI → download frozen Columbia weights |
-| `modal_eval.py` | CLI → `eval_run.remote(...)` |
+| `modal_eval.py` | CLI → `eval_run` via `spawn()` |
+| `modal_train_low.py` / `modal_train_high.py` | CLI → `train_*` via `spawn()` (`--detach` to not wait) |
 
-See [`configs/pusht/baseline_vanilla.yaml`](../configs/pusht/baseline_vanilla.yaml).
+See [`configs/pusht/dp_frozen.yaml`](../configs/pusht/dp_frozen.yaml).

@@ -1,0 +1,24 @@
+# Frozen Columbia Diffusion Policy — Push-T image CNN (official train_0 weights).
+# [eval] only — no training. For self-trained DP use ``dp.yaml``.
+#
+# Modal eval:
+#   modal run modal/modal_eval.py --config configs/pusht/dp_frozen.yaml
+#   modal run modal/modal_eval.py --config configs/pusht/dp_frozen.yaml --n-test 1
+#   modal run modal/modal_eval.py --config configs/pusht/dp_frozen.yaml --full
+#
+# Download weights once: modal run modal/modal_download_dp.py
+
+n_action_steps: 8  # [eval] receding-horizon execute window before replan (h=8)
+
+checkpoint:  # [eval] frozen Columbia weights on Modal volume
+  volume_path: /experiments/dp_baselines/pusht_image_cnn_train0/latest.ckpt  # [eval] path to latest.ckpt
+
+eval:  # [eval] modal_eval settings
+  wandb_enabled: true  # [eval] log overlap metrics (+ videos) to W&B
+  wandb_project: soda-eval  # [eval] W&B project name
+  policy: dp_frozen  # [eval] frozen Columbia DP (not SODA; use dp.yaml for self-trained)
+  record_video: true  # [eval] save rollout MP4s
+  smoke:  # [eval] default regime unless --full
+    n_test: 5  # [eval] quick sanity episode count
+  full:  # [eval] activated with --full
+    n_test: 50  # [eval] full benchmark episode count

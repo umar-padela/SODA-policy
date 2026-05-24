@@ -10,7 +10,7 @@ from soda.dataset.temporal_stretch import TemporalStretcher
 
 @pytest.fixture
 def stretcher() -> TemporalStretcher:
-    return TemporalStretcher(horizon_stretch_max=16)
+    return TemporalStretcher(horizon=16)
 
 
 def test_stretch_shape_and_duration_normalized(stretcher: TemporalStretcher) -> None:
@@ -26,9 +26,9 @@ def test_stretch_segment_steps_mismatch_raises(stretcher: TemporalStretcher) -> 
         stretcher.stretch(actions, segment_steps=3)
 
 
-def test_stretch_exceeds_horizon_stretch_max_raises(stretcher: TemporalStretcher) -> None:
+def test_stretch_exceeds_horizon_raises(stretcher: TemporalStretcher) -> None:
     actions = np.zeros((20, 2), dtype=np.float32)
-    with pytest.raises(ValueError, match="exceeds horizon_stretch_max"):
+    with pytest.raises(ValueError, match="exceeds horizon"):
         stretcher.stretch(actions)
 
 
@@ -40,8 +40,8 @@ def test_stretch_length_one(stretcher: TemporalStretcher) -> None:
     np.testing.assert_allclose(stretched, np.tile(actions, (16, 1)), rtol=1e-5)
 
 
-def test_stretch_identity_when_length_equals_horizon_stretch_max() -> None:
-    s = TemporalStretcher(horizon_stretch_max=8)
+def test_stretch_identity_when_length_equals_horizon() -> None:
+    s = TemporalStretcher(horizon=8)
     actions = np.random.default_rng(0).normal(size=(8, 4)).astype(np.float32)
     stretched, d_norm = s.stretch(actions)
     np.testing.assert_allclose(stretched, actions, rtol=1e-5)
@@ -81,6 +81,15 @@ def test_decode_duration_clips(stretcher: TemporalStretcher) -> None:
     assert stretcher.decode_duration(chunk) == 1
     chunk[..., -1] = 1.5
     assert stretcher.decode_duration(chunk) == 16
+
+
+def test_decode_segment_steps_batch() -> None:
+    from soda.dataset.temporal_stretch import decode_segment_steps
+
+    batch = np.zeros((2, 16, 3), dtype=np.float32)
+    batch[0, :, -1] = 0.25
+    batch[1, :, -1] = 1.0
+    assert decode_segment_steps(batch, 16).tolist() == [4, 16]
 
 
 def test_normalize_duration_alias() -> None:

@@ -22,7 +22,7 @@ data/raw/pusht/pusht.zarr/
   meta/episode_ends
 ```
 
-Configs set `option_id_key` to select supervised vs unsupervised column.
+Configs set `option_id_key` to select supervised vs unsupervised column. Push-T E1 supervised labels use **3 skills** (ids **0–2**); see [`soda/option_discovery/supervised/pusht/README.md`](../soda/option_discovery/supervised/pusht/README.md).
 
 Requires `zarr<3.0`.
 

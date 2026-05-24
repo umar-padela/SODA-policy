@@ -15,12 +15,11 @@ import zarr
 
 from soda.option_discovery.supervised.pusht.heuristics import SKILL_NAMES
 
-# OpenCV uses BGR; matches histogram colors in visualize_labels (gray/blue/green/orange)
+# OpenCV uses BGR; matches histogram colors in visualize_labels (blue/green/orange)
 SKILL_COLORS_BGR: dict[int, tuple[int, int, int]] = {
-    0: (128, 128, 128),
-    1: (255, 0, 0),
-    2: (0, 255, 0),
-    3: (0, 165, 255),
+    0: (255, 0, 0),
+    1: (0, 255, 0),
+    2: (0, 165, 255),
 }
 
 PUSHT_FPS = 10

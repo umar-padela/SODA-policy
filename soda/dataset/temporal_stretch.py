@@ -2,20 +2,19 @@
 Variable-horizon resampling for SODA low-level training (project_plan §2, §7 row 10).
 
 Maps option segments of native length ``segment_steps`` to a fixed training length
-``horizon_stretch_max`` via linear interpolation, and reverses the mapping at inference using
+``horizon`` via linear interpolation, and reverses the mapping at inference using
 the predicted **duration channel** (mean-pool → ``unstretch``).
 
 Naming (avoid confusion with eval control)
 -----------------------------------------
-- ``horizon_stretch_max``: training hyperparameter — resampled action chunk length for the
-  low-level U-Net (often set to the longest skill in the dataset). **Not** used in sim.
-- ``action_horizon``: eval-only — how many executed actions before replanning
-  (``soda/inference/control_regimes.py``; P0 default ``1`` = closed-loop).
-- ``policy_horizon``: frozen DP checkpoint prediction length (e.g. 16); unrelated to SODA
-  stretch training.
+- ``horizon``: U-Net action prediction length (DP convention). For SODA, variable
+  skills are stretched to this fixed length at train time. ``null`` in yaml → longest
+  option segment in the dataset. **Not** the sim step budget.
+- ``n_action_steps``: eval — how many actions from ``predict_action`` to execute
+  before replanning (``soda/eval/*_runner.py``; P0 default ``n_action_steps=8``).
 
 **Train time:** stretch **actions only**; observation windows are indexed separately in
-``OptionLabeledZarrDataset`` (row 11), not inside this class.
+``OptionAwareDataset`` (row 11), not inside this class.
 
 References
 ----------
@@ -64,55 +63,111 @@ def _linear_resample_time(
     return out
 
 
+def _check_horizon(horizon: int) -> int:
+    h = int(horizon)
+    if h < 1:
+        raise ValueError(f"horizon must be >= 1, got {horizon}")
+    return h
+
+
+def segment_steps_from_normalized_duration(
+    d_norm: float | np.floating,
+    horizon: int,
+) -> int:
+    """``round(d_norm * horizon)`` clipped to ``[1, horizon]``."""
+    h = _check_horizon(horizon)
+    steps = int(round(float(d_norm) * h))
+    return int(np.clip(steps, 1, h))
+
+
+def segment_steps_from_normalized_duration_batch(
+    d_norm: np.ndarray,
+    horizon: int,
+) -> np.ndarray:
+    """Vectorized :func:`segment_steps_from_normalized_duration`."""
+    h = _check_horizon(horizon)
+    arr = np.asarray(d_norm, dtype=np.float64)
+    steps = np.round(arr * h).astype(np.int64)
+    return np.clip(steps, 1, h)
+
+
+def _mean_duration_channel(action_chunk: np.ndarray) -> float | np.ndarray:
+    chunk = np.asarray(action_chunk, dtype=np.float64)
+    if chunk.shape[-1] < 2:
+        raise ValueError(
+            f"action_chunk needs duration channel (D+1), got shape {chunk.shape}"
+        )
+    duration = chunk[..., -1]
+    if duration.ndim == 1:
+        return float(np.mean(duration))
+    if duration.ndim == 2:
+        return np.mean(duration, axis=-1)
+    raise ValueError(
+        f"action_chunk must be (T, D+1) or (B, T, D+1), got shape {chunk.shape}"
+    )
+
+
+def decode_segment_steps(
+    action_chunk: np.ndarray,
+    horizon: int,
+) -> int | np.ndarray:
+    """
+    Mean-pool duration channel → predicted native segment length (project_plan §2).
+
+    ``(T, D+1)`` → ``int``; ``(B, T, D+1)`` → ``(B,)`` int array.
+    """
+    d_norm = _mean_duration_channel(action_chunk)
+    if isinstance(d_norm, float):
+        return segment_steps_from_normalized_duration(d_norm, horizon)
+    return segment_steps_from_normalized_duration_batch(d_norm, horizon)
+
+
 @dataclass
 class TemporalStretcher:
     """
-    Linear temporal resampling between native segment length and fixed ``horizon_stretch_max``.
+    Linear temporal resampling between native segment length and fixed ``horizon``.
 
     Parameters
     ----------
-    horizon_stretch_max
-        Fixed action sequence length after stretching (training hyperparameter; typically
-        ``>=`` the longest option segment in the dataset). Sets the low-level U-Net
-        ``horizon`` / action chunk size for SODA — distinct from eval ``action_horizon``.
+    horizon
+        Fixed action sequence length after stretching (typically ``>=`` the longest
+        option segment in the dataset). Sets the low-level U-Net prediction length —
+        distinct from eval ``n_action_steps``.
     interpolation
         Only ``"linear"`` is supported today.
     eps
         Small constant for numeric stability (reserved; linear interp handles ``T=1``).
     """
 
-    horizon_stretch_max: int
+    horizon: int
     interpolation: InterpolationMode = "linear"
     eps: float = 1e-6
 
     def __post_init__(self) -> None:
-        if self.horizon_stretch_max < 1:
-            raise ValueError(
-                f"horizon_stretch_max must be >= 1, got {self.horizon_stretch_max}"
-            )
+        if self.horizon < 1:
+            raise ValueError(f"horizon must be >= 1, got {self.horizon}")
         if self.interpolation != "linear":
             raise ValueError(f"unsupported interpolation: {self.interpolation!r}")
         if self.eps <= 0:
             raise ValueError(f"eps must be positive, got {self.eps}")
 
     @staticmethod
-    def normalize_duration(segment_steps: int, horizon_stretch_max: int) -> float:
+    def normalize_duration(segment_steps: int, horizon: int) -> float:
         """
         Map native segment length to ``(0, 1]`` for the duration channel target.
 
-        Same as ``segment_steps / horizon_stretch_max`` (formerly discussed as
-        ``h_i / h_max``).
+        Same as ``segment_steps / horizon``.
         """
         if segment_steps < 1:
             raise ValueError(f"segment_steps must be >= 1, got {segment_steps}")
-        if horizon_stretch_max < 1:
-            raise ValueError(f"horizon_stretch_max must be >= 1, got {horizon_stretch_max}")
-        return float(segment_steps) / float(horizon_stretch_max)
+        if horizon < 1:
+            raise ValueError(f"horizon must be >= 1, got {horizon}")
+        return float(segment_steps) / float(horizon)
 
     @staticmethod
-    def normalize_horizon(h_orig: int, horizon_stretch_max: int) -> float:
+    def normalize_horizon(h_orig: int, horizon: int) -> float:
         """Alias for :meth:`normalize_duration` (kept for call-site readability)."""
-        return TemporalStretcher.normalize_duration(h_orig, horizon_stretch_max)
+        return TemporalStretcher.normalize_duration(h_orig, horizon)
 
     def stretch(
         self,
@@ -122,7 +177,7 @@ class TemporalStretcher:
         h_orig: int | None = None,
     ) -> tuple[np.ndarray, float]:
         """
-        Resample a variable-length action segment to length ``horizon_stretch_max``.
+        Resample a variable-length action segment to length ``horizon``.
 
         Parameters
         ----------
@@ -149,14 +204,14 @@ class TemporalStretcher:
             raise ValueError(
                 f"actions length {act.shape[0]} does not match segment_steps={h_i}"
             )
-        if h_i > self.horizon_stretch_max:
+        if h_i > self.horizon:
             raise ValueError(
-                f"segment length {h_i} exceeds horizon_stretch_max={self.horizon_stretch_max}; "
-                "cap segments in the dataset or increase horizon_stretch_max"
+                f"segment length {h_i} exceeds horizon={self.horizon}; "
+                "cap segments in the dataset or increase horizon"
             )
 
-        stretched = _linear_resample_time(act, self.horizon_stretch_max)
-        duration_normalized = self.normalize_duration(h_i, self.horizon_stretch_max)
+        stretched = _linear_resample_time(act, self.horizon)
+        duration_normalized = self.normalize_duration(h_i, self.horizon)
         return stretched, duration_normalized
 
     def stretch_batch(
@@ -172,9 +227,9 @@ class TemporalStretcher:
         Returns
         -------
         stretched
-            Shape ``(N, horizon_stretch_max, D)``.
+            Shape ``(N, horizon, D)``.
         duration_normalized
-            Shape ``(N,)``, values ``segment_steps / horizon_stretch_max``.
+            Shape ``(N,)``, values ``segment_steps / horizon``.
         """
         if len(segments) == 0:
             raise ValueError("segments must be non-empty")
@@ -207,7 +262,7 @@ class TemporalStretcher:
         Parameters
         ----------
         actions
-            Shape ``(horizon_stretch_max, D)`` motion channels only (no duration column).
+            Shape ``(horizon, D)`` motion channels only (no duration column).
         segment_steps_pred
             Predicted native segment length (typically from ``decode_duration``).
         h_pred
@@ -219,35 +274,26 @@ class TemporalStretcher:
         act = np.asarray(actions, dtype=np.float64)
         if act.ndim != 2:
             raise ValueError(
-                f"actions must be 2-D (horizon_stretch_max, D), got shape {act.shape}"
+                f"actions must be 2-D (horizon, D), got shape {act.shape}"
             )
-        if act.shape[0] != self.horizon_stretch_max:
+        if act.shape[0] != self.horizon:
             raise ValueError(
-                f"actions length {act.shape[0]} != horizon_stretch_max {self.horizon_stretch_max}"
+                f"actions length {act.shape[0]} != horizon {self.horizon}"
             )
 
         h_out = int(round(float(segment_steps_pred)))
-        h_out = int(np.clip(h_out, 1, self.horizon_stretch_max))
+        h_out = int(np.clip(h_out, 1, self.horizon))
         return _linear_resample_time(act, h_out)
 
     def decode_duration(self, action_chunk: np.ndarray) -> int:
-        """
-        Decode predicted native segment length from a ``D+1`` action chunk.
-
-        Mean-pools the last (duration) channel, then maps
-        ``round(mean * horizon_stretch_max)`` into ``[1, horizon_stretch_max]``.
-        """
-        chunk = np.asarray(action_chunk, dtype=np.float64)
-        if chunk.shape[-1] < 2:
-            raise ValueError(
-                f"action_chunk needs duration channel (D+1), got shape {chunk.shape}"
-            )
-        d_norm = float(np.mean(chunk[..., -1]))
-        steps = int(round(d_norm * self.horizon_stretch_max))
-        return int(np.clip(steps, 1, self.horizon_stretch_max))
+        """Decode native segment length from a ``D+1`` chunk (delegates to :func:`decode_segment_steps`)."""
+        steps = decode_segment_steps(action_chunk, self.horizon)
+        if not isinstance(steps, (int, np.integer)):
+            raise ValueError("decode_duration expects one chunk (T, D+1), not a batch")
+        return int(steps)
 
     def decode_horizon(self, action_chunk: np.ndarray) -> int:
-        """Alias for :meth:`decode_duration` (duration channel, not eval ``action_horizon``)."""
+        """Alias for :meth:`decode_duration` (duration channel, not eval ``n_action_steps``)."""
         return self.decode_duration(action_chunk)
 
     def append_duration_channel(
@@ -255,14 +301,13 @@ class TemporalStretcher:
         actions: np.ndarray,
         duration_normalized: float,
     ) -> np.ndarray:
-        """Build ``(horizon_stretch_max, D+1)`` training target by broadcasting the duration scalar."""
+        """Build ``(horizon, D+1)`` training target by broadcasting the duration scalar."""
         act = np.asarray(actions, dtype=np.float32)
-        if act.ndim != 2 or act.shape[0] != self.horizon_stretch_max:
+        if act.ndim != 2 or act.shape[0] != self.horizon:
             raise ValueError(
-                f"actions must be (horizon_stretch_max, D) with horizon_stretch_max="
-                f"{self.horizon_stretch_max}, got {act.shape}"
+                f"actions must be (horizon, D) with horizon={self.horizon}, got {act.shape}"
             )
-        d_ch = np.full((self.horizon_stretch_max, 1), duration_normalized, dtype=np.float32)
+        d_ch = np.full((self.horizon, 1), duration_normalized, dtype=np.float32)
         return np.concatenate([act, d_ch], axis=-1)
 
     def append_horizon_channel(
@@ -280,7 +325,7 @@ class TemporalStretcher:
         segment_steps: int | None = None,
         h_orig: int | None = None,
     ) -> np.ndarray:
-        """Stretch segment and return ``(horizon_stretch_max, D+1)`` with duration channel filled."""
+        """Stretch segment and return ``(horizon, D+1)`` with duration channel filled."""
         stretched, d_norm = self.stretch(
             actions, segment_steps=segment_steps, h_orig=h_orig
         )
