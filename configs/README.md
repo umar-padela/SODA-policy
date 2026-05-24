@@ -44,7 +44,7 @@ These live at the **top level** of `soda_*.yaml`. Changing them after training r
 | `option_id_key` | `option_id_supervised` | Label column | `_supervised` vs `_unsupervised` |
 | `val_ratio` | `0.1` | Split only | Episode-level train/val |
 | `seed` | `42` | Split only | |
-| `min_segment_len` | `1` | Dataset filter | Drop tiny segments |
+| `min_segment_len` | `5` | Dataset filter | Drop tiny segments (1–4 frame contacts are heuristic noise) |
 | `num_workers` | `4` | DataLoader | |
 
 ### `task.env_runner` (eval only)

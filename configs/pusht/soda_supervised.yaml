@@ -35,7 +35,7 @@ task:
     option_id_key: option_id_supervised   # which label column (supervised heuristic)
     val_ratio: 0.1         # fraction of episodes held out for validation
     seed: 42                 # split + sampling reproducibility
-    min_segment_len: 1       # drop option segments shorter than this (steps)
+    min_segment_len: 5       # drop option segments shorter than this (steps)
     num_workers: 4         # DataLoader workers
 
 # --- π_high architecture (HighPolicy) ---

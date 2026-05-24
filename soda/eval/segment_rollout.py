@@ -41,7 +41,7 @@ class SegmentRolloutConfig:
     n_obs_steps: int = 2
     n_action_steps: int = 8
     max_steps: int | None = None  # default: remaining segment length
-    legacy_test: bool = True
+    legacy_test: bool = False  # must be False for zarr-anchored reset: legacy order (pos then angle) shifts block by 45·sin(θ) due to CoG offset
     render_size: int = 96
     fps: int = 10
     record_video: bool = True
