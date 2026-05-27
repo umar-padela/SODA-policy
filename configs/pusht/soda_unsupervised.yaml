@@ -1,0 +1,16 @@
+# Push-T SODA training with LOVE-discovered options (E3 unsupervised).
+#
+# This is a stub. The SODA-side knobs (model dims, train schedule, eval, ...)
+# live in configs/pusht/soda_supervised.yaml — currently empty (Umar's track).
+# Once soda_supervised.yaml is populated, this file should extend it via Hydra
+# defaults and override only what's below.
+#
+# Until then, this declares the swap from heuristic to LOVE labels:
+
+option_id_key: option_id_unsupervised
+
+# Populated after running:
+#   python -m soda.option_discovery.unsupervised.love_adapter.label \
+#       --ckpt experiments/love_pusht/best.ckpt
+# label.py prints "K_final=N" — copy that number here.
+num_options: TBD

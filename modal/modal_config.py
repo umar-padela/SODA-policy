@@ -264,3 +264,35 @@ def train_high(config_name: str = "soda_supervised", task: str = "pusht") -> Non
         ],
     )
     volume.commit()
+
+
+@app.function(
+    image=image,
+    gpu="T4",
+    timeout=14400,
+    volumes={EXPERIMENTS_MOUNT: volume},
+    secrets=[_wandb_secret],
+)
+def train_love() -> None:
+    """Remote wrapper around the LOVE adapter trainer (E3 unsupervised, Push-T).
+
+    Writes the best checkpoint and the action k-means centroids to the
+    persistent volume under /experiments/love_pusht/.
+    """
+    import os
+
+    out_dir = Path(EXPERIMENTS_MOUNT) / "love_pusht"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    env = os.environ.copy()
+    env["SODA_LOVE_CKPT_DIR"] = str(out_dir)
+    subprocess.run(
+        [
+            "python",
+            "-m",
+            "soda.option_discovery.unsupervised.love_adapter.train",
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        check=True,
+    )
+    volume.commit()
