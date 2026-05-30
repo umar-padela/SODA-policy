@@ -1,4 +1,4 @@
-"""Unit tests for π_high (no DP checkpoint required)."""
+"""Unit tests for π_high classifier (no DP checkpoint required)."""
 
 from __future__ import annotations
 
@@ -10,8 +10,7 @@ from soda.models.high_policy import (
     HighPolicy,
     HighPolicyConfig,
     ObsEncoder,
-    OptionFlowMatchingSchedule,
-    OptionVelocityMLP,
+    OptionClassifier,
 )
 
 
@@ -46,18 +45,44 @@ def _dummy_obs_encoder(*, n_obs_steps: int = 2, feat_per_step: int = 4) -> ObsEn
 def _cfg(**overrides) -> HighPolicyConfig:
     defaults = dict(
         num_options=4,
-        option_embed_dim=16,
         global_feat_dim=8,
-        fm_hidden_dim=32,
-        fm_num_layers=2,
-        time_embed_dim=32,
-        num_inference_steps=5,
+        hidden_dim=32,
+        num_layers=2,
     )
     defaults.update(overrides)
     return HighPolicyConfig(**defaults)
 
 
-def test_high_policy_fm_loss_and_sample():
+# ---------------------------------------------------------------------------
+# OptionClassifier
+# ---------------------------------------------------------------------------
+
+
+def test_option_classifier_forward_shape() -> None:
+    clf = OptionClassifier(global_feat_dim=16, hidden_dim=32, num_layers=2, num_options=3)
+    feat = torch.randn(5, 16)
+    logits = clf(feat)
+    assert logits.shape == (5, 3)
+
+
+def test_option_classifier_num_layers_one() -> None:
+    # depth-1 is a single linear with no hidden block
+    clf = OptionClassifier(global_feat_dim=8, hidden_dim=16, num_layers=1, num_options=4)
+    logits = clf(torch.randn(2, 8))
+    assert logits.shape == (2, 4)
+
+
+def test_option_classifier_num_layers_raises() -> None:
+    with pytest.raises(ValueError, match="num_layers"):
+        OptionClassifier(global_feat_dim=8, hidden_dim=16, num_layers=0, num_options=3)
+
+
+# ---------------------------------------------------------------------------
+# HighPolicy
+# ---------------------------------------------------------------------------
+
+
+def test_high_policy_loss_and_sample() -> None:
     obs_encoder = _dummy_obs_encoder()
     policy = HighPolicy(_cfg(), obs_encoder)
     B = 3
@@ -72,95 +97,67 @@ def test_high_policy_fm_loss_and_sample():
     assert torch.isfinite(loss)
     assert logs["loss"] >= 0.0
 
-    loss_forward = policy(obs, option_id)
-    assert loss_forward.ndim == 0
-    assert torch.isfinite(loss_forward)
 
-    pred = policy.sample_option(policy.encode_obs(obs))
+def test_high_policy_forward_train_mode() -> None:
+    # forward with option_id returns loss scalar
+    obs_encoder = _dummy_obs_encoder()
+    policy = HighPolicy(_cfg(), obs_encoder)
+    obs = {"image": torch.rand(2, 2, 3, 96, 96), "agent_pos": torch.rand(2, 2, 2)}
+    option_id = torch.tensor([0, 3], dtype=torch.long)
+    loss = policy(obs, option_id)
+    assert loss.ndim == 0
+    assert torch.isfinite(loss)
+
+
+def test_high_policy_sample_option_shape_and_range() -> None:
+    obs_encoder = _dummy_obs_encoder()
+    policy = HighPolicy(_cfg(num_options=3), obs_encoder)
+    B = 5
+    obs = {"image": torch.rand(B, 2, 3, 96, 96), "agent_pos": torch.rand(B, 2, 2)}
+    global_feat = policy.encode_obs(obs)
+    pred = policy.sample_option(global_feat)
     assert pred.shape == (B,)
     assert pred.dtype == torch.long
     assert pred.min() >= 0
-    assert pred.max() < 4
+    assert pred.max() < 3
 
 
-def test_discrete_decode_nearest_embed():
+def test_high_policy_forward_inference_mode() -> None:
+    # forward without option_id returns option ids
     obs_encoder = _dummy_obs_encoder()
-    policy = HighPolicy(_cfg(num_options=3, option_embed_dim=4), obs_encoder)
-    # Place x_end exactly on option 1's embedding row.
-    target = policy.option_embed.weight[1:2]
-    pred = policy.discrete_decode_from_embedding(target)
-    assert pred.item() == 1
+    policy = HighPolicy(_cfg(num_options=4), obs_encoder)
+    B = 2
+    obs = {"image": torch.rand(B, 2, 3, 96, 96), "agent_pos": torch.rand(B, 2, 2)}
+    pred = policy(obs)
+    assert pred.shape == (B,)
+    assert pred.min() >= 0 and pred.max() < 4
 
 
-@pytest.fixture
-def velocity_net() -> OptionVelocityMLP:
-    return OptionVelocityMLP(
-        embed_dim=32,
-        global_feat_dim=128,
-        time_embed_dim=32,
-        hidden_dim=256,
-        num_layers=3,
-    )
+def test_high_policy_sample_option_is_argmax() -> None:
+    # sample_option must equal argmax of classifier logits
+    obs_encoder = _dummy_obs_encoder()
+    policy = HighPolicy(_cfg(num_options=3), obs_encoder)
+    obs = {"image": torch.rand(2, 2, 3, 96, 96), "agent_pos": torch.rand(2, 2, 2)}
+    global_feat = policy.encode_obs(obs)
+    with torch.no_grad():
+        logits = policy.classifier(global_feat)
+        expected = logits.argmax(dim=-1)
+        got = policy.sample_option(global_feat)
+    assert torch.equal(got, expected)
 
 
-def test_option_velocity_mlp_forward_shape(velocity_net: OptionVelocityMLP) -> None:
-    B, d, gf = 4, 32, 128
-    x_t = torch.randn(B, d)
-    global_feat = torch.randn(B, gf)
-    t = torch.rand(B)
-    v = velocity_net(x_t, global_feat, t)
-    assert v.shape == (B, d)
+def test_high_policy_loss_with_class_weights() -> None:
+    obs_encoder = _dummy_obs_encoder()
+    policy = HighPolicy(_cfg(num_options=3), obs_encoder)
+    obs = {"image": torch.rand(4, 2, 3, 96, 96), "agent_pos": torch.rand(4, 2, 2)}
+    option_id = torch.tensor([0, 1, 2, 0], dtype=torch.long)
+    weights = torch.tensor([1.0, 2.0, 3.0])
+    loss, _ = policy.compute_loss({"obs": obs, "option_id": option_id}, class_weights=weights)
+    assert loss.ndim == 0
+    assert torch.isfinite(loss)
 
 
-def test_option_velocity_mlp_with_fm_interpolate(
-    velocity_net: OptionVelocityMLP,
-) -> None:
-    B, d, gf = 4, 32, 128
-    x1 = torch.randn(B, d)
-    t = torch.rand(B)
-    x_t, v_tgt = OptionFlowMatchingSchedule.interpolate(x1, t)
-    assert x_t.shape == (B, d)
-    assert v_tgt.shape == (B, d)
-    v_pred = velocity_net(x_t, torch.randn(B, gf), t)
-    assert v_pred.shape == (B, d)
-
-
-def test_option_velocity_mlp_accepts_t_shape_b1(
-    velocity_net: OptionVelocityMLP,
-) -> None:
-    B, d, gf = 2, 32, 128
-    x_t = torch.randn(B, d)
-    global_feat = torch.randn(B, gf)
-    t = torch.rand(B, 1)
-    v = velocity_net(x_t, global_feat, t)
-    assert v.shape == (B, d)
-
-
-def test_option_velocity_mlp_num_layers_raises() -> None:
-    with pytest.raises(ValueError, match="num_layers"):
-        OptionVelocityMLP(32, 128, 32, hidden_dim=64, num_layers=0)
-
-
-def test_option_flow_matching_interpolate_matches_hw1_formula() -> None:
-    torch.manual_seed(0)
-    x1 = torch.randn(16, 8)
-    t = torch.rand(16)
-    x_t, velocity = OptionFlowMatchingSchedule.interpolate(x1, t)
-    x0 = x1 - velocity
-    t_r = t.unsqueeze(-1)
-    assert torch.allclose(x_t, t_r * x1 + (1 - t_r) * x0)
-    assert torch.allclose(velocity, x1 - x0)
-
-
-def test_option_flow_matching_integrate_euler_shape() -> None:
-    B, d, gf = 3, 8, 16
-    schedule = OptionFlowMatchingSchedule(embed_dim=d, num_inference_steps=4)
-    global_feat = torch.randn(B, gf)
-
-    def const_velocity(
-        x_t: torch.Tensor, _gf: torch.Tensor, _t: torch.Tensor
-    ) -> torch.Tensor:
-        return torch.zeros_like(x_t)
-
-    x_end = schedule.integrate_euler(const_velocity, global_feat)
-    assert x_end.shape == (B, d)
+def test_high_policy_global_feat_dim_mismatch_raises() -> None:
+    obs_encoder = _dummy_obs_encoder(feat_per_step=4)  # global_feat_dim=8
+    with pytest.raises(ValueError, match="global_feat_dim"):
+        HighPolicy(_cfg(global_feat_dim=99), obs_encoder)

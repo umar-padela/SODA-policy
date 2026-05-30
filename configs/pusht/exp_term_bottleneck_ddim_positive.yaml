@@ -1,0 +1,129 @@
+# ============================================================
+# Experiment: termination_study / stage1a — Q1: does DDIM bottleneck beat expert?
+# Run: BOTTLENECK_DDIM_POSITIVE — β trained on DDIM-5 generated actions (positive-only labels).
+#   Training: 5-step DDIM sample → U-Net at t=0 → bottleneck (matches inference distribution)
+#   Inference: policy DDPM plan → U-Net at t=0 → bottleneck (same path)
+#   Labels: completion-only (β=1 at last frame of each segment)
+# Backbone frozen: only β MLP trains. 100 epochs.
+# pos_weight: null → auto-calculated from data (n_neg/n_pos ≈ 16 for L=17)
+# ============================================================
+
+name: exp_term_bottleneck_ddim_positive
+
+n_obs_steps: 2
+n_action_steps: 8
+horizon: null
+past_action_visible: false
+obs_as_global_cond: true
+
+task:
+  name: pusht_image
+  env_runner:
+    legacy_test: true
+    test_start_seed: 100000
+    max_steps: 300
+    fps: 10
+    crf: 22
+    render_size: 96
+    tqdm_interval_sec: 5.0
+  dataset:
+    zarr_path: data/raw/pusht/pusht.zarr
+    option_id_key: option_id_supervised
+    val_ratio: 0.1
+    seed: 42
+    min_segment_len: 3
+    num_workers: 8
+    anchor_cut_last_n: 0
+
+# === WHAT CHANGES ===
+policy:
+  kernel_size: 5               # UPDATE: set to best kernel from kernel_size_study
+  crop_shape: [84, 84]
+  num_inference_steps: 100
+  diffusion_step_embed_dim: 128
+  down_dims: [512, 1024, 2048]
+  n_groups: 8
+  cond_predict_scale: true
+  eval_fixed_crop: true
+  obs_encoder_group_norm: true
+
+low_policy:
+  num_options: null
+  option_embed_dim: 32
+  bottleneck_dim: 2048
+  termination_input: bottleneck_ddim5
+  termination_stop_grad: true
+  termination_label_smoothing: 0.05
+  escape_relabeling: false
+  imagenet_init: true
+  termination_head:
+    bottleneck_dim: 2048
+    hidden_dim: 256
+    num_layers: 2
+    use_chunk_cursor: false
+    dropout_rate: 0.3        # regularize beta MLP; ~1300 positives, risk of overfitting
+
+# === CONSTANT ACROSS ALL EXPERIMENTS ===
+noise_scheduler:
+  num_train_timesteps: 100
+  beta_start: 0.0001
+  beta_end: 0.02
+  beta_schedule: squaredcos_cap_v2
+  clip_sample: true
+  prediction_type: epsilon
+  variance_type: fixed_small
+
+train_low:
+  device: cuda:0
+  seed: 42
+  num_workers: 4
+  output_dir: null
+  wandb_enabled: true
+  wandb_project: soda-final-experiments
+  wandb_run_name: null
+  wandb_group: termination_study_stage1
+  wandb_tags: [termination_study, stage1a, bottleneck_ddim_positive, frozen]
+  use_ema: true
+  run_readme: null
+  two_phase: false
+  train_phases: both
+  num_epochs: 100
+  batch_size: 64
+  lr: 1.0e-4
+  lr_warmup_epochs: 0
+  lr_schedule_type: constant
+  lr_plateau_patience: null
+  lr_plateau_patience_beta: null
+  lr_plateau_factor: null
+  lr_plateau_min_lr: null
+  weight_decay: 1.0e-6
+  checkpoint_every: 50
+  termination_loss_weight: 1.0
+  termination_stop_grad: true
+  termination_pos_weight: null  # auto-calculated from data (n_neg/n_pos, escape-aware)
+  beta_lr: 1.0e-3
+  skip_diffusion_loss: true
+  beta_stratified_batches: false
+  mask_diffusion_on_positive: false
+  all_anchors: true
+  option_balance: none
+  best_checkpoint_metric: loss_termination
+  finetune_dp_checkpoint: null
+  warmstart_unet: null
+  checkpoint: null              # OVERRIDE at launch
+
+inference:
+  beta_transition: 0.9
+  beta_diffusion_t: 0
+  high_checkpoint: /experiments/pusht/train_high_conditioned_prev_option/best.ckpt
+  low_checkpoint: null
+
+eval:
+  wandb_enabled: true
+  wandb_project: soda-final-experiments
+  policy: soda
+  record_video: true
+  smoke:
+    n_test: 5
+  full:
+    n_test: 50

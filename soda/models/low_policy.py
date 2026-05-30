@@ -147,24 +147,27 @@ class LowPolicyConfig:
     termination_loss_weight: float
     termination_pos_weight: float = 1.0
     termination_input: str = "bottleneck"
-    # If True (default §8): detach β features before MLP; feature path under no_grad.
-    # If False: L_termination backprops into termination_input backbone (ablation).
     termination_stop_grad: bool = True
+    termination_label_smoothing: float = 0.0
+    imagenet_init: bool = False
+    escape_relabeling: bool = False  # True when dataset uses positive_negative expand-all
 
 
 # ---------------------------------------------------------------------------
 # Low policy (subclass DP)
 # ---------------------------------------------------------------------------
 
-TerminationInput = str  # "bottleneck" | "obs"
+TerminationInput = str  # "bottleneck" | "obs" | "both" | "bottleneck_ddim5"
+
+_TERMINATION_INPUTS = ("bottleneck", "obs", "both", "bottleneck_ddim5")
 
 
 def normalize_termination_input(value: str) -> str:
-    """Parse ``low_policy.termination_input`` (``bottleneck`` or ``obs``)."""
+    """Parse ``low_policy.termination_input``."""
     mode = str(value).strip().lower()
-    if mode not in ("bottleneck", "obs"):
+    if mode not in _TERMINATION_INPUTS:
         raise ValueError(
-            f"termination_input must be 'bottleneck' or 'obs', got {value!r}"
+            f"termination_input must be one of {_TERMINATION_INPUTS}, got {value!r}"
         )
     return mode
 
@@ -174,8 +177,43 @@ def obs_termination_input_dim(
     n_obs_steps: int,
     option_embed_dim: int,
 ) -> int:
-    """β MLP input size for ``termination_input=obs`` (encoder feat + ``option_embed(ω)``)."""
+    """β MLP input size for ``termination_input=obs``: obs_feat * n_obs_steps + option_embed."""
     return int(obs_feature_dim) * int(n_obs_steps) + int(option_embed_dim)
+
+
+def both_termination_input_dim(
+    obs_feature_dim: int,
+    n_obs_steps: int,
+    option_embed_dim: int,
+    bottleneck_dim: int,
+) -> int:
+    """β MLP input size for ``termination_input=both``: obs+option concat + bottleneck."""
+    return obs_termination_input_dim(obs_feature_dim, n_obs_steps, option_embed_dim) + int(bottleneck_dim)
+
+
+def _load_imagenet_pretrained_conv_weights(obs_encoder: "nn.Module") -> None:
+    """Copy ImageNet pretrained conv weights into all ResNet18Conv backbones in obs_encoder.
+
+    The robomimic path initializes ResNet18Conv with pretrained=False. This function
+    loads torchvision IMAGENET1K_V1 weights and copies all shape-compatible parameters
+    (conv kernels + norm weight/bias) into each backbone via strict=False, skipping
+    BN running stats that don't exist in GroupNorm.
+    """
+    import torchvision.models as tvm
+    from robomimic.models.base_nets import ResNet18Conv
+
+    pretrained = tvm.resnet18(weights="IMAGENET1K_V1")
+    pretrained_sd = torch.nn.Sequential(*(list(pretrained.children())[:-2])).state_dict()
+
+    loaded = 0
+    for module in obs_encoder.modules():
+        if isinstance(module, ResNet18Conv):
+            module.nets.load_state_dict(pretrained_sd, strict=False)
+            loaded += 1
+
+    if loaded == 0:
+        raise RuntimeError("imagenet_init=True but no ResNet18Conv found in obs_encoder")
+    print(f"[LowPolicy] ImageNet pretrained conv weights loaded into {loaded} ResNet18Conv backbone(s)")
 
 
 def _build_low_policy_class() -> type:
@@ -237,6 +275,8 @@ def _build_low_policy_class() -> type:
                 )
 
             self.cfg = cfg
+            if cfg.imagenet_init:
+                _load_imagenet_pretrained_conv_weights(self.obs_encoder)
             self._init_soda_modules(cfg, unet_kwargs)
 
         def _init_soda_modules(
@@ -259,15 +299,32 @@ def _build_low_policy_class() -> type:
             self.option_embed = nn.Embedding(cfg.num_options, cfg.option_embed_dim)
             self.termination_input = normalize_termination_input(cfg.termination_input)
             self._stretcher = TemporalStretcher(horizon=self.horizon)
-            if self.termination_input == "bottleneck":
+
+            if self.termination_input in ("bottleneck", "bottleneck_ddim5"):
+                # Both use the U-Net bottleneck vector as β MLP input.
+                # bottleneck: expert actions at t=0 (cheap, deterministic).
+                # bottleneck_ddim5: DDIM-5 generated actions at t=0 (closer to inference).
                 if cfg.termination_head.bottleneck_dim != expected_bottleneck:
                     raise ValueError(
                         "termination_head.bottleneck_dim="
                         f"{cfg.termination_head.bottleneck_dim} must match U-Net mid dim "
-                        f"{expected_bottleneck} when termination_input=bottleneck"
+                        f"{expected_bottleneck} when termination_input={self.termination_input}"
                     )
                 th_cfg = cfg.termination_head
-            else:
+            elif self.termination_input == "both":
+                # Concat [obs+option features, bottleneck] → β MLP.
+                th_cfg = TerminationHeadConfig(
+                    bottleneck_dim=both_termination_input_dim(
+                        int(self.obs_feature_dim),
+                        int(self.n_obs_steps),
+                        int(cfg.option_embed_dim),
+                        expected_bottleneck,
+                    ),
+                    hidden_dim=cfg.termination_head.hidden_dim,
+                    num_layers=cfg.termination_head.num_layers,
+                    use_chunk_cursor=cfg.termination_head.use_chunk_cursor,
+                )
+            else:  # obs
                 th_cfg = TerminationHeadConfig(
                     bottleneck_dim=obs_termination_input_dim(
                         int(self.obs_feature_dim),
@@ -276,8 +333,24 @@ def _build_low_policy_class() -> type:
                     ),
                     hidden_dim=cfg.termination_head.hidden_dim,
                     num_layers=cfg.termination_head.num_layers,
+                    use_chunk_cursor=cfg.termination_head.use_chunk_cursor,
                 )
             self.termination_head = TerminationHead(th_cfg)
+
+            # DDIM scheduler for bottleneck_ddim5: 5-step sampling during training.
+            # self.noise_scheduler is set by parent __init__ before _init_soda_modules.
+            if self.termination_input == "bottleneck_ddim5":
+                from diffusers.schedulers.scheduling_ddim import DDIMScheduler as _DDIMScheduler
+                ns = self.noise_scheduler
+                self._ddim_scheduler = _DDIMScheduler(
+                    num_train_timesteps=ns.config.num_train_timesteps,
+                    beta_start=ns.config.beta_start,
+                    beta_end=ns.config.beta_end,
+                    beta_schedule=ns.config.beta_schedule,
+                    clip_sample=ns.config.clip_sample,
+                    prediction_type=ns.config.prediction_type,
+                )
+                self._ddim_scheduler.set_timesteps(5)
 
         # ------------------------------------------------------------------
         # Option conditioning
@@ -296,10 +369,14 @@ def _build_low_policy_class() -> type:
             """Concat obs global features with ``option_embed(ω)`` for U-Net conditioning."""
             return torch.cat([obs_features, self.option_embedding(option_id)], dim=-1)
 
-        def predict_termination_logit(self, features: torch.Tensor) -> torch.Tensor:
+        def predict_termination_logit(
+            self,
+            features: torch.Tensor,
+            chunk_cursor: torch.Tensor | None = None,
+        ) -> torch.Tensor:
             """β MLP on bottleneck or obs+ω features (optional stop-grad on input)."""
             return self.termination_head(
-                features, stop_grad=self.cfg.termination_stop_grad
+                features, stop_grad=self.cfg.termination_stop_grad, chunk_cursor=chunk_cursor
             )
 
         def termination_features_from_batch(
@@ -335,6 +412,7 @@ def _build_low_policy_class() -> type:
                     obs_feat = self.encode_obs_global_features(nobs, batch_size)
                     return self.build_global_cond(obs_feat, option_id)
 
+            # All remaining modes need global_cond (obs + option embedding).
             if trajectory is None or global_cond is None:
                 nactions = self.normalizer["action"].normalize(batch["action"])
                 trajectory = nactions
@@ -343,12 +421,33 @@ def _build_low_policy_class() -> type:
                     option_id,
                 )
 
+            t_zero = torch.zeros(batch_size, device=device, dtype=torch.long)
+
+            if self.termination_input == "bottleneck":
+                # Expert actions at t=0 → bottleneck (cheap, deterministic).
+                with grad_ctx:
+                    _, features = self.forward_unet_with_bottleneck(
+                        trajectory, t_zero, global_cond
+                    )
+                return features
+
+            if self.termination_input == "bottleneck_ddim5":
+                # DDIM-5 generated actions at t=0 → bottleneck (closer to inference).
+                # Sampling always no_grad (can't backprop through 5 DDIM steps anyway).
+                x_hat = self._sample_ddim5(global_cond)  # no_grad inside
+                with grad_ctx:
+                    _, features = self.forward_unet_with_bottleneck(
+                        x_hat, t_zero, global_cond
+                    )
+                return features
+
+            # both: concat [obs+option features, bottleneck from expert actions at t=0]
             with grad_ctx:
-                t_zero = torch.zeros(batch_size, device=device, dtype=torch.long)
-                _, features = self.forward_unet_with_bottleneck(
+                obs_cond = global_cond  # already [obs_feat || option_embed]
+                _, bottleneck = self.forward_unet_with_bottleneck(
                     trajectory, t_zero, global_cond
                 )
-            return features
+            return torch.cat([obs_cond, bottleneck], dim=-1)
 
         def encode_obs_global_features(
             self, nobs: dict[str, torch.Tensor], batch_size: int
@@ -372,10 +471,43 @@ def _build_low_policy_class() -> type:
                 self.model, sample, timestep, global_cond, local_cond=None
             )
 
+        def _sample_ddim5(self, global_cond: torch.Tensor) -> torch.Tensor:
+            """Generate action chunk via DDIM in 5 steps (no gradient).
+
+            Used by ``termination_input=bottleneck_ddim5`` during training to produce
+            a policy-generated plan (closer to inference distribution than expert actions).
+            Returns normalized actions of shape ``(B, horizon, action_dim)``; caller
+            feeds this to ``forward_unet_with_bottleneck`` at t=0 for the bottleneck.
+            """
+            B = global_cond.shape[0]
+            device = global_cond.device
+            dtype = global_cond.dtype
+            motion_dim = self.action_dim - 1  # exclude duration channel
+            x = torch.randn(B, self.horizon, motion_dim, device=device, dtype=dtype)
+            with torch.no_grad():
+                for t in self._ddim_scheduler.timesteps:
+                    t_batch = torch.full((B,), int(t), device=device, dtype=torch.long)
+                    # Pad to action_dim with zeros for duration channel (not denoised)
+                    x_input = torch.cat([
+                        x,
+                        torch.zeros(B, self.horizon, 1, device=device, dtype=dtype),
+                    ], dim=-1)
+                    noise_pred = self.model(x_input, t_batch, global_cond=global_cond)
+                    # Only step the motion dims
+                    x = self._ddim_scheduler.step(
+                        noise_pred[..., :motion_dim], t, x
+                    ).prev_sample
+            # Return as full action_dim with zero duration channel (only motion dims used for bottleneck)
+            return torch.cat([
+                x,
+                torch.zeros(B, self.horizon, 1, device=device, dtype=dtype),
+            ], dim=-1)
+
         def beta_logits_from_batch(self, batch: dict[str, Any]) -> torch.Tensor:
             """Termination logits for val metrics (matches ``compute_loss`` β branch)."""
             features = self.termination_features_from_batch(batch)
-            return self.predict_termination_logit(features)
+            chunk_cursor = batch.get("chunk_cursor", None)
+            return self.predict_termination_logit(features, chunk_cursor=chunk_cursor)
 
         @torch.no_grad()
         def predict_beta(
@@ -385,12 +517,17 @@ def _build_low_policy_class() -> type:
             action_plan: torch.Tensor | None = None,
             *,
             diffusion_t: int = 0,
+            chunk_cursor: float | torch.Tensor | None = None,
         ) -> torch.Tensor:
             """
             Inference β from ``termination_input`` features.
 
             ``bottleneck``: U-Net @ ``(cached plan, t=diffusion_t, obs, ω)``.
             ``obs``: ``global_cond(obs, ω)`` only (``action_plan`` ignored).
+
+            ``chunk_cursor``: scalar or ``(B,)`` tensor ∈ [0, 1] indicating progress
+            through the current option segment. Passed to the termination head when
+            ``use_chunk_cursor=True``.
             """
             nobs = self.normalizer.normalize(obs_dict)
             value = next(iter(nobs.values()))
@@ -399,11 +536,19 @@ def _build_low_policy_class() -> type:
             dtype = value.dtype
             option_id = option_id.reshape(-1).long().to(device)
 
+            cursor_t: torch.Tensor | None = None
+            if chunk_cursor is not None:
+                if torch.is_tensor(chunk_cursor):
+                    cursor_t = chunk_cursor.reshape(batch_size).to(device=device, dtype=dtype)
+                else:
+                    cursor_t = torch.full((batch_size,), float(chunk_cursor), device=device, dtype=dtype)
+
             if self.termination_input == "obs":
                 obs_feat = self.encode_obs_global_features(nobs, batch_size)
                 features = self.build_global_cond(obs_feat, option_id)
-                return torch.sigmoid(self.predict_termination_logit(features))
+                return torch.sigmoid(self.predict_termination_logit(features, chunk_cursor=cursor_t))
 
+            # All bottleneck-based modes need global_cond and a trajectory.
             global_cond = self.build_global_cond(
                 self.encode_obs_global_features(nobs, batch_size),
                 option_id,
@@ -424,8 +569,16 @@ def _build_low_policy_class() -> type:
                 traj = self.normalizer["action"].normalize(traj)
 
             t = torch.full((batch_size,), int(diffusion_t), device=device, dtype=torch.long)
-            _, features = self.forward_unet_with_bottleneck(traj, t, global_cond)
-            return torch.sigmoid(self.predict_termination_logit(features))
+            _, bottleneck = self.forward_unet_with_bottleneck(traj, t, global_cond)
+
+            if self.termination_input in ("bottleneck", "bottleneck_ddim5"):
+                # At inference, both use the cached DDPM plan (action_plan).
+                # bottleneck_ddim5's DDIM sampling is training-only; inference path is identical.
+                return torch.sigmoid(self.predict_termination_logit(bottleneck, chunk_cursor=cursor_t))
+
+            # both: concat [obs+option, bottleneck]
+            features = torch.cat([global_cond, bottleneck], dim=-1)
+            return torch.sigmoid(self.predict_termination_logit(features, chunk_cursor=cursor_t))
 
         @torch.no_grad()
         def predict_action(
@@ -493,6 +646,8 @@ def _build_low_policy_class() -> type:
             batch: dict[str, Any],
             *,
             class_weights: torch.Tensor | None = None,
+            mask_diffusion_on_positive: bool = False,
+            skip_diffusion: bool = False,
         ) -> tuple[torch.Tensor, dict[str, float]]:
             """
             π_low training loss: diffusion MSE + weighted termination BCE.
@@ -501,13 +656,8 @@ def _build_low_policy_class() -> type:
             logging (``loss``, ``loss_diffusion``, ``loss_termination``). Only
             ``loss_total`` is backpropped.
 
-            ``L_termination`` → ``TerminationHead``; if ``termination_stop_grad`` (default),
-            no grad into U-Net/encoder from β. If False, β also updates the t=0 U-Net path
-            and/or obs encoder (ablation).
-
-            ``termination_input=bottleneck``: second U-Net forward at ``t=0`` on clean expert
-            plan (teacher-forced). ``termination_input=obs``: ``global_cond(obs, ω)`` only.
-            Diffusion still trains at random ``t`` on the noisy trajectory.
+            When ``skip_diffusion=True`` the noisy U-Net forward is skipped and
+            ``loss_diff=0``. Use in phase 2 where backbone lr=0 to save compute.
             """
             from soda.training.losses_low import (
                 diffusion_loss,
@@ -524,68 +674,93 @@ def _build_low_policy_class() -> type:
             batch_size = int(nactions.shape[0])
             option_id = batch["option_id"].reshape(-1).long().to(nactions.device)
             beta_label = batch["beta_label"].reshape(-1).to(nactions.device)
+            chunk_cursor = batch["chunk_cursor"].reshape(-1).to(nactions.device) if "chunk_cursor" in batch else None
+            # is_escape: True for synthetic wrong-option examples (positive_negative training).
+            # These must not train the diffusion head — the wrong option_id in global_cond
+            # would corrupt U-Net if paired with real actions in the diffusion loss.
+            is_escape = batch.get("is_escape")
+            if is_escape is not None:
+                is_escape = is_escape.reshape(-1).bool().to(nactions.device)
 
             # Option-conditioned global cond (obs encoder + embed(ω)).
             global_cond = self.build_global_cond(
                 self.encode_obs_global_features(nobs, batch_size),
                 option_id,
             )
-
-            # Forward diffusion at random t (same schedule as vanilla DP).
             trajectory = nactions
-            condition_mask = self.mask_generator(trajectory.shape)
-            noise = torch.randn_like(trajectory)
-            timesteps = torch.randint(
-                0,
-                self.noise_scheduler.config.num_train_timesteps,
-                (batch_size,),
-                device=trajectory.device,
-            ).long()
-            noisy_trajectory = self.noise_scheduler.add_noise(
-                trajectory, noise, timesteps
-            )
-            loss_mask = ~condition_mask
-            noisy_trajectory = noisy_trajectory.clone()
-            noisy_trajectory[condition_mask] = trajectory[condition_mask]
 
-            pred, _ = self.forward_unet_with_bottleneck(
-                noisy_trajectory, timesteps, global_cond
-            )
-
-            pred_type = self.noise_scheduler.config.prediction_type
-            if pred_type == "epsilon":
-                target = noise
-            elif pred_type == "sample":
-                target = trajectory
+            # --- Diffusion loss ---
+            if skip_diffusion:
+                loss_diff = nactions.new_zeros(())
             else:
-                raise ValueError(f"Unsupported prediction type {pred_type}")
+                condition_mask = self.mask_generator(trajectory.shape)
+                noise = torch.randn_like(trajectory)
+                timesteps = torch.randint(
+                    0,
+                    self.noise_scheduler.config.num_train_timesteps,
+                    (batch_size,),
+                    device=trajectory.device,
+                ).long()
+                noisy_trajectory = self.noise_scheduler.add_noise(
+                    trajectory, noise, timesteps
+                )
+                loss_mask = ~condition_mask
+                noisy_trajectory = noisy_trajectory.clone()
+                noisy_trajectory[condition_mask] = trajectory[condition_mask]
 
-            # Termination features (``no_grad`` inside); β MLP *outside* so it receives grads.
+                pred, _ = self.forward_unet_with_bottleneck(
+                    noisy_trajectory, timesteps, global_cond
+                )
+
+                pred_type = self.noise_scheduler.config.prediction_type
+                if pred_type == "epsilon":
+                    target = noise
+                elif pred_type == "sample":
+                    target = trajectory
+                else:
+                    raise ValueError(f"Unsupported prediction type {pred_type}")
+
+                neg_mask = (beta_label == 0).float() if mask_diffusion_on_positive else None
+                # Escape examples must not contribute to diffusion loss regardless of
+                # mask_diffusion_on_positive — their option_id is wrong for these actions.
+                if is_escape is not None and is_escape.any():
+                    non_escape = (~is_escape).float()
+                    neg_mask = (neg_mask * non_escape) if neg_mask is not None else non_escape
+
+                if class_weights is not None:
+                    per_sample_diff = diffusion_loss_per_sample(pred, target, loss_mask)
+                    if neg_mask is not None:
+                        per_sample_diff = per_sample_diff * neg_mask
+                    loss_diff = weighted_option_mean(per_sample_diff, option_id, class_weights)
+                else:
+                    if neg_mask is not None:
+                        per_sample_diff = diffusion_loss_per_sample(pred, target, loss_mask)
+                        n_neg = neg_mask.sum().clamp(min=1.0)
+                        loss_diff = (per_sample_diff * neg_mask).sum() / n_neg
+                    else:
+                        loss_diff = diffusion_loss(pred, target, loss_mask)
+
+            # --- Termination loss (``no_grad`` inside features; β MLP receives grads) ---
             term_features = self.termination_features_from_batch(
                 batch,
                 trajectory=trajectory,
                 global_cond=global_cond,
             )
-            beta_logit = self.predict_termination_logit(term_features)
+            beta_logit = self.predict_termination_logit(term_features, chunk_cursor=chunk_cursor)
             pos_weight = self.cfg.termination_pos_weight
+            label_smoothing = float(self.cfg.termination_label_smoothing)
 
             if class_weights is not None:
-                loss_diff = weighted_option_mean(
-                    diffusion_loss_per_sample(pred, target, loss_mask),
-                    option_id,
-                    class_weights,
-                )
                 loss_term = weighted_option_mean(
                     termination_bce_loss_per_sample(
-                        beta_logit, beta_label, pos_weight=pos_weight
+                        beta_logit, beta_label, pos_weight=pos_weight, label_smoothing=label_smoothing
                     ),
                     option_id,
                     class_weights,
                 )
             else:
-                loss_diff = diffusion_loss(pred, target, loss_mask)
                 loss_term = termination_bce_loss(
-                    beta_logit, beta_label, pos_weight=pos_weight
+                    beta_logit, beta_label, pos_weight=pos_weight, label_smoothing=label_smoothing
                 )
 
             return low_policy_total_loss(

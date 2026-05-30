@@ -50,15 +50,18 @@ high_policy:
   num_inference_steps: 10  # Euler steps when sampling ω at inference
 
 # --- π_low SODA-specific (LowPolicyConfig) ---
-# Locked β recipe (Push-T): bottleneck + joint training, γ=1, λ=0.1 (same as soda_supervised.yaml).
+# β recipe: bottleneck + joint training, stop_grad=true, γ=1, λ=1.
+# stop_grad=true: termination loss only updates β MLP; U-Net trains on diffusion loss only.
+# γ=1: equal pos/neg BCE weight (50/50 segment-end vs mid-segment examples).
+# λ=1: full gradient to β head — safe with stop_grad since it can't corrupt U-Net features.
 low_policy:
   num_options: null  # must match π_high; null = infer from zarr
   option_embed_dim: 32  # concat to U-Net global_cond (match high_policy)
   bottleneck_dim: 2048  # U-Net mid channels; must equal policy.down_dims[-1] (Columbia)
-  termination_loss_weight: 0.1  # λ on termination BCE (joint training; do not use 1.0 with stop_grad=false)
+  termination_loss_weight: 1.0  # λ: with stop_grad=true, only scales β head gradient; safe at 1.0
   termination_pos_weight: 1  # γ=1 — auto (~17) collapses β to always-1; keep 1 for this recipe
   termination_input: bottleneck  # U-Net t=0 pooled bottleneck → β MLP (obs-only was too weak)
-  termination_stop_grad: false  # L_termination backprops into U-Net (t=0) + encoder (locked)
+  termination_stop_grad: true   # termination gradient stops at bottleneck; U-Net unaffected
   termination_head:
     bottleneck_dim: 2048  # input dim when termination_input=bottleneck; auto when obs
     hidden_dim: 256  # β MLP hidden size
@@ -98,6 +101,9 @@ train_high:
   output_dir: null  # null → experiments/train_high/{name}/ (Modal → /experiments/train_high/{name}/)
   wandb_enabled: true  # log metrics to Weights & Biases
   wandb_project: soda-train-high  # W&B project name
+  wandb_run_name: null  # optional; sweeps set run name
+  wandb_group: null  # optional; sweeps set group
+  wandb_tags: []  # optional; sweeps set tags
   low_checkpoint: null  # REQUIRED for π_high: pass --low-checkpoint on modal_train_high.py
   dp_checkpoint: null  # fallback if low_checkpoint null: Columbia DP .ckpt for frozen ObsEncoder only
   num_workers: 4  # DataLoader workers (overrides task.dataset.num_workers if set here)
@@ -107,26 +113,39 @@ train_high:
 train_low:
   device: cuda:0  # training device
   seed: 42  # RNG seed for training
-  num_epochs: 100  # training epochs
-  batch_size: 64  # batch size
-  lr: 1.0e-4  # AdamW learning rate
+  num_epochs: 4000  # upper bound; stop whenever plateau is reached
+  batch_size: 128  # batch size
+  lr: 3.13e-4  # A4 sweep winner (pusht/sweep_low/lr3.13e-04)
   weight_decay: 1.0e-6  # AdamW weight decay
   checkpoint_every: 10  # save epoch_* every N epochs (+ best/latest)
   output_dir: null  # null → experiments/train_low/{name}/ (Modal → /experiments/train_low/{name}/)
   wandb_enabled: true  # log metrics to Weights & Biases
   wandb_project: soda-train-low  # W&B project name
+  wandb_run_name: null  # optional; sweeps set run name
+  wandb_group: null  # optional; sweeps set group
+  wandb_tags: []  # optional; sweeps set tags
   finetune_dp_checkpoint: null  # optional: warm-start π_low from vanilla DP weights
   num_workers: 4  # DataLoader workers
   option_balance: inverse_freq  # none | inverse_freq — train loss weights per skill segment count
   use_ema: true  # EMA of policy weights; eval/checkpoints use EMA (matches Columbia DP)
-  lr_warmup_epochs: 5  # linear ramp 0→lr; cosine decays over remaining (num_epochs - 5) epochs
+  lr_warmup_epochs: 5  # linear ramp 0→lr over first 5 epochs
+  lr_schedule_type: plateau    # "plateau": warmup then ReduceLROnPlateau (epoch-count-independent)
+                                # "cosine":  warmup then cosine decay over num_epochs (ties to total)
+  beta_lr: null                # β head LR; null = same as lr (backbone and β head share LR by default)
+  lr_plateau_patience: 50      # backbone (diffusion) epochs without improvement before LR decay
+  lr_plateau_patience_beta: 100  # β head patience — longer because U-Net feature shifts can cause
+                                  # temporary β loss stalls that aren't true convergence
+  lr_plateau_factor: 0.5       # LR multiplied by this on each plateau trigger
+  lr_plateau_min_lr: 1.0e-6    # floor for LR — training never goes below this
   beta_stratified_batches: true  # each train batch mixes beta=1 (segment end) + beta=0 (random anchor)
   beta_batch_pos_fraction: null  # null → 1/(gamma+1) from termination_pos_weight; not 1/gamma
-  best_checkpoint_metric: loss  # val_loss = val_loss_diffusion + λ*val_loss_termination; with λ=0.1 and converged β, tracks both
+  best_checkpoint_metric: loss_diffusion  # checkpoint on diffusion quality; β monitored separately via val_beta_*
+  mask_diffusion_on_positive: true  # only compute diffusion MSE on β=0 (random-anchor) examples
+  skip_diffusion_loss: false        # not used in single-phase training
 
 # --- Hierarchical eval (soda_runner / policy_loaders; not used during training) ---
 inference:
-  beta_transition: 0.9  # terminate option when sigmoid(β) >= this threshold
+  beta_transition: 0.5  # terminate option when sigmoid(β) >= this threshold
   beta_diffusion_t: 0  # diffusion timestep for β head at rollout (0 = clean plan)
   high_checkpoint: null  # e.g. /experiments/train_high/soda_unsupervised/best.ckpt
   low_checkpoint: null  # e.g. /experiments/train_low/soda_unsupervised/best.ckpt

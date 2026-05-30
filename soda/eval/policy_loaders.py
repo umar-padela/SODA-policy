@@ -257,6 +257,66 @@ def load_frozen_dp_obs_encoder(
     return obs_encoder, normalizer, n_obs_steps, global_feat_dim
 
 
+def load_imagenet_dp_obs_encoder(
+    checkpoint: str | Path,
+    device: str = "cpu",
+) -> tuple[Any, Any, int, int]:
+    """Build DP obs encoder with ImageNet weights (not Push-T fine-tuned).
+
+    Instantiates the DP workspace from checkpoint config WITHOUT loading the
+    model state dict, so the ResNet backbone retains ImageNet+GroupNorm weights.
+    Only the normalizer (Push-T data statistics) is loaded from the checkpoint.
+    """
+    import sys
+
+    import dill
+    import torch
+
+    _require_diffusion_policy()
+    import subprocess
+
+    subprocess.run(
+        [sys.executable, "-m", "pip", "install", "-q", "-e", str(DP_ROOT)],
+        check=True,
+        cwd=str(DP_ROOT),
+    )
+
+    import hydra
+    from diffusion_policy.workspace.base_workspace import BaseWorkspace  # noqa: F401
+
+    checkpoint = Path(checkpoint)
+    payload = torch.load(open(checkpoint, "rb"), pickle_module=dill, map_location="cpu")
+    cfg = payload["cfg"]
+
+    # Build workspace from cfg only — NO load_payload → ResNet has ImageNet+GroupNorm weights
+    workspace_cls = hydra.utils.get_class(cfg._target_)
+    workspace = workspace_cls(cfg, output_dir=str(checkpoint.parent / "_imagenet_init_tmp"))
+    policy = workspace.model
+
+    # Load only the normalizer (Push-T mean/std) from checkpoint state dict
+    model_state: dict[str, Any] = payload["state_dicts"]["model"]
+    normalizer_state = {
+        k[len("normalizer."):]: v
+        for k, v in model_state.items()
+        if k.startswith("normalizer.")
+    }
+    policy.normalizer.load_state_dict(normalizer_state)
+
+    policy.to(torch.device(device))
+    policy.eval()
+
+    obs_encoder = policy.obs_encoder
+    normalizer = policy.normalizer
+    n_obs_steps = int(policy.n_obs_steps)
+    global_feat_dim = int(policy.obs_feature_dim) * n_obs_steps
+
+    obs_encoder.eval()
+    for param in obs_encoder.parameters():
+        param.requires_grad = False
+
+    return obs_encoder, normalizer, n_obs_steps, global_feat_dim
+
+
 def load_frozen_low_obs_encoder(
     checkpoint: str | Path,
     device: str = "cuda:0",

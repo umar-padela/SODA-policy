@@ -34,13 +34,16 @@ def _dataset_train_n_action_steps(yaml_cfg: Any) -> int:
 
 
 def resolve_dp_output_dir(yaml_cfg: Any) -> Path:
-    """Default ``experiments/train_dp/{name}/`` unless ``train_dp.output_dir`` is set."""
+    """Default ``experiments/{task}/train_dp/{name}/`` unless ``train_dp.output_dir`` is set."""
+    from soda.experiments.paths import infer_task_slug, train_dp_dir
+
     name = str(_cfg_get(yaml_cfg, "name", "dp"))
     train = _get_block(yaml_cfg, "train_dp")
     raw = _cfg_get(train, "output_dir", None)
     if raw:
         return Path(str(raw))
-    return REPO_ROOT / "experiments" / "train_dp" / name
+    task = infer_task_slug(yaml_cfg)
+    return REPO_ROOT / train_dp_dir(task, name)
 
 
 def build_columbia_workspace_cfg(yaml_cfg: Any) -> Any:

@@ -21,7 +21,7 @@ Training entrypoints and loss helpers for π_high and π_low. Config-driven via 
 
 **Recommended order:** train π_low → set `train_high.low_checkpoint` → train π_high.
 
-**Checkpoints** (`best.ckpt`, `latest.ckpt`, `epoch_*.ckpt`):
+**Checkpoints** (`best.ckpt`, `latest.ckpt`, `epoch_*.ckpt`); **`metrics.json`** is rewritten each epoch (safe after Ctrl+C).
 
 ```python
 {

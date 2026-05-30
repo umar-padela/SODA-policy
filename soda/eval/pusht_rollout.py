@@ -8,6 +8,7 @@ import os
 from typing import Any, Literal
 
 import numpy as np
+import torch
 
 from soda.eval.metrics import (
     DEFAULT_OVERLAP_CHECKPOINTS,
@@ -152,6 +153,9 @@ def rollout_episode(
     from soda.eval.metrics import compute_episode_metrics
 
     env.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
     obs = env.reset()
     policy.reset()
 

@@ -19,11 +19,11 @@ DP_PUSHT_IMAGE_TRAIN0_BASE = (
 )
 DP_PUSHT_IMAGE_TRAIN0_LATEST_URL = f"{DP_PUSHT_IMAGE_TRAIN0_BASE}/latest.ckpt"
 
+from soda.experiments.paths import frozen_dp_pusht_checkpoint
+
 # Canonical path on Modal Volume (see ``modal download_frozen_dp``).
 FROZEN_DP_PUSHT_CKPT_FILENAME = "latest.ckpt"
-DEFAULT_FROZEN_DP_VOLUME_PATH = Path(
-    "/experiments/dp_baselines/pusht_image_cnn_train0/latest.ckpt"
-)
+DEFAULT_FROZEN_DP_VOLUME_PATH = Path(frozen_dp_pusht_checkpoint(in_volume=True))
 
 
 def ensure_dp_checkpoint(

@@ -68,7 +68,7 @@ class _MockLow:
     ) -> torch.Tensor:
         self.beta_calls += 1
         self._step += 1
-        if self._beta_after is not None and self._step >= self._beta_after:
+        if self._beta_after is not None and self._step == self._beta_after:
             return torch.ones(option_id.shape[0])
         return torch.zeros(option_id.shape[0])
 
@@ -93,7 +93,7 @@ def _policy(
     )
 
 
-def test_n_action_steps_one_diffuses_every_step():
+def test_executes_full_native_before_replan():
     policy = HierarchicalPolicy(
         device=torch.device("cpu"),
         config=HierarchicalPolicyConfig(
@@ -102,17 +102,20 @@ def test_n_action_steps_one_diffuses_every_step():
             n_action_steps=1,
         ),
         pi_high=_MockHigh(),
-        pi_low=_MockLow(n_action_steps=16, beta_after=None),
+        pi_low=_MockLow(n_action_steps=16, beta_after=None, native_steps=4),
     )
     low = policy._pi_low
     assert isinstance(low, _MockLow)
 
-    policy.predict_action(_obs())
+    for _ in range(4):
+        policy.predict_action(_obs())
+    assert low.diffusion_calls == 1
+
     policy.predict_action(_obs())
     assert low.diffusion_calls == 2
 
 
-def test_n_action_steps_eight_reuses_pre_sliced_chunk():
+def test_reuses_chunk_until_native_exhausted():
     policy = HierarchicalPolicy(
         device=torch.device("cpu"),
         config=HierarchicalPolicyConfig(
@@ -121,7 +124,7 @@ def test_n_action_steps_eight_reuses_pre_sliced_chunk():
             n_action_steps=8,
         ),
         pi_high=_MockHigh(),
-        pi_low=_MockLow(n_action_steps=16, beta_after=None),
+        pi_low=_MockLow(n_action_steps=16, beta_after=None, native_steps=16),
     )
     low = policy._pi_low
     assert isinstance(low, _MockLow)
@@ -130,7 +133,7 @@ def test_n_action_steps_eight_reuses_pre_sliced_chunk():
     assert low.diffusion_calls == 1
     assert first["action"].shape == (1, 1, 2)
 
-    for _ in range(7):
+    for _ in range(15):
         policy.predict_action(_obs())
     assert low.diffusion_calls == 1
 
@@ -153,11 +156,11 @@ def test_beta_checked_every_step_after_warmup():
     assert isinstance(low, _MockLow)
 
     policy.predict_action(_obs())
-    assert low.beta_calls == 0
+    assert low.beta_calls == 1
 
     for _ in range(5):
         policy.predict_action(_obs())
-    assert low.beta_calls == 5
+    assert low.beta_calls == 6
 
 
 def test_beta_fires_early_replan():
@@ -169,22 +172,21 @@ def test_beta_fires_early_replan():
             n_action_steps=8,
         ),
         pi_high=_MockHigh(),
-        pi_low=_MockLow(n_action_steps=16, beta_after=3),
+        pi_low=_MockLow(n_action_steps=16, beta_after=4),
     )
     low = policy._pi_low
     assert isinstance(low, _MockLow)
 
-    policy.predict_action(_obs())
-    policy.predict_action(_obs())
-    policy.predict_action(_obs())
+    for _ in range(3):
+        policy.predict_action(_obs())
     assert low.diffusion_calls == 1
 
     policy.predict_action(_obs())
     assert low.diffusion_calls == 2
 
 
-def test_native_cap_replans_at_n_action_steps():
-    """Replan at min(native_len, n_action_steps), not full native length."""
+def test_replans_after_full_native_chunk():
+    """Replan after native chunk exhausted, not at n_action_steps."""
     policy = HierarchicalPolicy(
         device=torch.device("cpu"),
         config=HierarchicalPolicyConfig(
@@ -198,7 +200,7 @@ def test_native_cap_replans_at_n_action_steps():
     low = policy._pi_low
     assert isinstance(low, _MockLow)
 
-    for _ in range(8):
+    for _ in range(16):
         policy.predict_action(_obs())
     assert low.diffusion_calls == 1
 

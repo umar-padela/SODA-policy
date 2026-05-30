@@ -37,7 +37,49 @@ Download::
 
 from __future__ import annotations
 
+from pathlib import Path
+
+import modal
+
 from modal_config import app, list_rollout_segments, rollout_low_policy, spawn_modal_function
+from soda.experiments.paths import MODAL_VOLUME_NAME, volume_relative_path
+
+
+def _download_rollout_files(result: dict, local_save_path: str) -> None:
+    """Download rollout output files from Modal Volume to a local directory."""
+    local_dir = Path(local_save_path)
+    local_dir.mkdir(parents=True, exist_ok=True)
+
+    remote_paths: list[str] = []
+
+    if result.get("output_dir"):
+        rel = volume_relative_path(result["output_dir"])
+        remote_paths.append(f"{rel}/invoke_command.txt")
+
+    if result.get("representative_samples"):
+        video_items = result.get("rollouts") or []
+    else:
+        video_items = [result] if result.get("video_path") else []
+
+    for item in video_items:
+        if item.get("video_path"):
+            vrel = volume_relative_path(item["video_path"])
+            remote_paths.append(vrel)
+            remote_paths.append(vrel.replace(".mp4", ".json"))
+
+    vol = modal.Volume.from_name(MODAL_VOLUME_NAME)
+    downloaded = 0
+    for remote in remote_paths:
+        local_file = local_dir / Path(remote).name
+        try:
+            data = b"".join(vol.read_file(remote))
+            local_file.write_bytes(data)
+            print(f"  downloaded: {local_file}")
+            downloaded += 1
+        except Exception:
+            print(f"  skipped (not found on volume): {remote}")
+
+    print(f"Downloaded {downloaded} file(s) → {local_dir.resolve()}")
 
 
 def _build_invoke_command(
@@ -59,6 +101,7 @@ def _build_invoke_command(
     output_dir: str | None,
     no_video: bool,
     list_limit: int,
+    local_save_path: str | None,
 ) -> str:
     parts = [
         "modal run modal/modal_rollout_low_policy.py",
@@ -95,6 +138,8 @@ def _build_invoke_command(
         parts.append("--no-video")
     if list_limit != 30:
         parts.append(f"--list-limit {list_limit}")
+    if local_save_path:
+        parts.append(f"--local-save-path {local_save_path}")
     return " ".join(parts)
 
 
@@ -117,6 +162,7 @@ def main(
     output_dir: str | None = None,
     no_video: bool = False,
     list_limit: int = 30,
+    local_save_path: str | None = None,
 ):
     invoke_command = _build_invoke_command(
         run_readme=run_readme,
@@ -136,6 +182,7 @@ def main(
         output_dir=output_dir,
         no_video=no_video,
         list_limit=list_limit,
+        local_save_path=local_save_path,
     )
 
     if list_segments:
@@ -215,3 +262,7 @@ def main(
             print(f"  download: modal volume get soda-experiments {rel} rollout.mp4")
 
     print("Done. Files on Modal Volume soda-experiments (under segment_rollout/).")
+
+    if local_save_path:
+        print(f"\nDownloading output files to {local_save_path} ...")
+        _download_rollout_files(result, local_save_path)

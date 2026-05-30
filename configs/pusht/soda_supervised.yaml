@@ -33,43 +33,51 @@ task:
   dataset:                 # zarr + option segments (π_high and π_low training)
     zarr_path: data/raw/pusht/pusht.zarr  # demo data with option_id_* column
     option_id_key: option_id_supervised   # which label column (supervised heuristic)
-    val_ratio: 0.1         # fraction of episodes held out for validation
+    val_ratio: 0.1         # see reasoning below — SODA generates far fewer val examples per episode than DP
     seed: 42                 # split + sampling reproducibility
     min_segment_len: 5       # drop option segments shorter than this (steps)
-    num_workers: 4         # DataLoader workers
+    num_workers: 8         # match base DP
+    anchor_cut_last_n: 8   # π_high multi-anchor aug: use all frames except last N per segment (0 = start only)
 
-# --- π_high architecture (HighPolicy) ---
+# --- π_high architecture (HighPolicy) — cross-entropy classifier ---
 high_policy:
   num_options: null        # |unique option ids| in zarr; null = infer from dataset
-  option_embed_dim: 32     # flow-matching target / embedding width
   global_feat_dim: null    # obs encoder output dim; null = infer from frozen DP checkpoint
-  fm_hidden_dim: 256       # option velocity MLP hidden size
-  fm_num_layers: 3         # velocity MLP depth
-  time_embed_dim: 32       # sinusoidal FM time embedding dim
-  num_inference_steps: 10  # Euler steps when sampling ω at inference
+  hidden_dim: 256          # classifier MLP hidden size
+  num_layers: 2            # classifier MLP depth
+  condition_on_prev_option: false  # true → concatenate prev-option embedding to obs feat
+  prev_option_embed_dim: 32        # dim of prev-option embedding (null token = num_options)
 
 # --- π_low SODA-specific (LowPolicyConfig) ---
-# Locked β recipe (Push-T supervised): bottleneck + joint training, γ=1, λ=0.1.
+# β recipe: obs termination + two-phase training.
+# Phase 1 (150 epochs): stop_grad=true → β head trains from frozen backbone features (no ResNet gradient).
+#   Diffusion loss shapes the backbone; β learns to fire on stable, well-formed representations.
+# Phase 2 (350 epochs): stop_grad=false → β gradients flow into obs encoder (joint fine-tuning).
+#   λ=0.005 keeps β contribution ≈13% of total ResNet gradient (diffusion is restoring force).
+#   Binary labels (last frame=1, rest=0) + label smoothing ε=0.05 prevent logit saturation.
+#
+# termination_loss_weight (λ), termination_pos_weight (γ), termination_stop_grad live in
+# train_low phase blocks — they are training-time parameters, not model-architecture params.
 low_policy:
   num_options: null        # must match π_high; null = infer from zarr
-  option_embed_dim: 32     # concatenated to U-Net global_cond (match high_policy)
-  bottleneck_dim: 2048     # U-Net mid channels; must equal policy.down_dims[-1] (Columbia)
-  termination_loss_weight: 0.1  # λ on termination BCE (joint training; do not use 1.0 with stop_grad=false)
-  termination_pos_weight: 1  # γ=1 — auto (~17) collapses β to always-1; keep 1 for this recipe
-  termination_input: bottleneck  # U-Net t=0 pooled bottleneck → β MLP (obs-only was too weak)
-  termination_stop_grad: false  # L_termination backprops into U-Net (t=0) + encoder (locked)
+  option_embed_dim: 32     # concatenated to U-Net global_cond; small perturbation to DP architecture
+  bottleneck_dim: 2048     # U-Net mid channels; must equal policy.down_dims[-1]
+  termination_input: obs         # obs+ω encoding → β MLP (no second U-Net forward at inference)
+  termination_stop_grad: true    # initial value; overridden per phase in train_low phase blocks
+  termination_label_smoothing: 0.05  # ε: maps 0→0.05 and 1→0.95 (prevents logit saturation)
   termination_head:
-    bottleneck_dim: 2048   # input dim when termination_input=bottleneck; auto when obs
+    bottleneck_dim: 2048   # overridden by obs_termination_input_dim when termination_input=obs
     hidden_dim: 256        # β MLP hidden size
     num_layers: 2          # β MLP depth
+    use_chunk_cursor: false # cursor removed: β learns termination from obs alone
 
 # --- π_low DP hybrid backbone — match ``dp.yaml`` / upstream ``image_pusht_diffusion_policy_cnn.yaml`` ---
 policy:
   crop_shape: [84, 84]     # Columbia Push-T hybrid crop (96×96 render → 84×84)
   num_inference_steps: 100 # DDPM denoising steps at inference
   diffusion_step_embed_dim: 128  # Columbia U-Net time embedding
-  down_dims: [512, 1024, 2048]  # Columbia U-Net channel pyramid (last = bottleneck_dim)
-  kernel_size: 5           # 1D conv kernel in U-Net
+  down_dims: [512, 1024, 2048]  # matches base DP Push-T; last value must equal low_policy.bottleneck_dim
+  kernel_size: 9           # due to larger action chunk horizon, increased from 5
   n_groups: 8              # GroupNorm groups in U-Net
   cond_predict_scale: true # FiLM scale in conditional U-Net blocks
   eval_fixed_crop: true    # Columbia eval uses fixed crop
@@ -89,49 +97,93 @@ noise_scheduler:
 train_high:
   device: cuda:0
   seed: 42
-  num_epochs: 100
+  num_epochs: 1000
   batch_size: 64
   lr: 1.0e-4
-  weight_decay: 1.0e-6
-  checkpoint_every: 10     # save epoch_* every N epochs (+ best/latest)
+  weight_decay: 1.0e-5
+  checkpoint_every: 5      # save epoch_* every N epochs (+ best/latest)
   output_dir: null         # null → experiments/train_high/{name}/ (Modal → /experiments/train_high/{name}/)
   wandb_enabled: true
   wandb_project: soda-train-high
-  low_checkpoint: null     # REQUIRED for π_high: pass --low-checkpoint on modal_train_high.py (e.g. /experiments/train_low/soda_supervised/best.ckpt)
-  dp_checkpoint: null      # fallback if low_checkpoint null: Columbia DP .ckpt for frozen ObsEncoder only
+  wandb_run_name: null     # optional; sweeps set e.g. lr1.00e-04
+  wandb_group: null        # optional; sweeps set e.g. B4-lr-sweep
+  wandb_tags: []           # optional; sweeps set e.g. [sweep, pi_high, B4]
+  low_checkpoint: null     # REQUIRED for π_high: pass --low-checkpoint on modal_train_high.py (e.g. /experiments/pusht/train_low/soda_supervised/best.ckpt)
+  dp_checkpoint: /experiments/dp_baselines/pusht_image_cnn_train0/latest.ckpt
   num_workers: 4
-  option_balance: inverse_freq  # none | inverse_freq — train loss weights per skill segment count
+  option_balance: none           # none | inverse_freq — multi-anchor aug provides enough linear-push samples; weighting shifts decision boundary toward rare class
   use_ema: true                 # EMA of policy weights; eval/checkpoints use EMA (matches π_low)
   lr_warmup_epochs: 5          # linear ramp 0→lr; cosine decays over remaining (num_epochs - 5) epochs
+  freeze_obs_encoder: false    # true → frozen ResNet; false → gradients flow into ResNet (risk: overfitting with ~1.3k segment-start samples)
+  backbone_lr: 1.0e-4          # ResNet LR; matches MLP lr — ImageNet init needs full adaptation, no Push-T features to preserve
+  dropout_rate: 0.3            # MLP dropout after each hidden Mish; slows memorisation, buys more useful epochs
+  label_smoothing: 0.1         # CE label smoothing; prevents logit explosion on easy training examples
+  imagenet_init: true          # true → ImageNet-only ResNet init (no Push-T fine-tuning); independent of DP training run
 
 # --- π_low optimization (train_low.py reads this block only) ---
+#
+# Phase-specific params (num_epochs, lr, etc.) accept either:
+#   scalar          → same value for every phase (or the only phase if two_phase: false)
+#   [p1_val, p2_val] → different value per phase  (only valid when two_phase: true)
+#
 train_low:
+  # ── Shared infra (single value; applies to all phases) ──────────────────────
   device: cuda:0
   seed: 42
-  num_epochs: 100
-  batch_size: 64
-  lr: 1.0e-4
+  batch_size: 64                # match base DP
   weight_decay: 1.0e-6
-  checkpoint_every: 10
-  output_dir: null         # null → experiments/train_low/{name}/ (Modal → /experiments/train_low/{name}/)
+  checkpoint_every: 10          # save epoch_NNNN.ckpt every N epochs (+ best/latest always)
+  output_dir: null              # null → experiments/train_low/{name}/  (Modal auto-sets to Volume path)
   wandb_enabled: true
   wandb_project: soda-train-low
-  finetune_dp_checkpoint: null  # optional: warm-start π_low from vanilla DP weights
+  wandb_run_name: null          # null → auto; sweeps override e.g. lr3.13e-04-p1
+  wandb_group: null             # null → no group; sweeps override e.g. A4-lr-sweep
+  wandb_tags: []                # optional list; sweeps override e.g. [sweep, pi_low]
+  finetune_dp_checkpoint: null   # null = scratch train (ImageNet-pretrained ResNet only)
+                                 # set to /experiments/dp_baselines/.../latest.ckpt to warmstart
   num_workers: 4
-  option_balance: inverse_freq  # none | inverse_freq — train loss weights per skill segment count
-  use_ema: true                 # EMA of policy weights; eval/checkpoints use EMA (matches Columbia DP)
-  lr_warmup_epochs: 5          # linear ramp 0→lr; cosine decays over remaining (num_epochs - 5) epochs
-  beta_stratified_batches: true  # each train batch mixes beta=1 (segment end) + beta=0 (random anchor)
-  beta_batch_pos_fraction: null  # null → 1/(gamma+1) from termination_pos_weight; not 1/gamma
-  best_checkpoint_metric: loss  # val_loss = val_loss_diffusion + λ*val_loss_termination; with λ=0.1 and converged β, tracks both
+  option_balance: inverse_freq  # "none" | "inverse_freq" — per-skill loss weights by segment count
+  use_ema: true                 # EMA policy weights for checkpoints (matches Columbia DP)
+  lr_schedule_type: constant    # "constant": linear warmup → constant lr (matches Columbia DP effective
+                                #   LR for epochs 0-500; their 3050-epoch cosine barely decays)
+                                # "plateau":  ReduceLROnPlateau after warmup (epoch-count-independent)
+                                # "cosine":   cosine decay tied to num_epochs
+  lr_plateau_patience: null     # unused (lr_schedule_type: constant)
+  lr_plateau_patience_beta: null # unused (lr_schedule_type: constant)
+  lr_plateau_factor: null       # unused (lr_schedule_type: constant)
+  lr_plateau_min_lr: null       # unused (lr_schedule_type: constant)
+  beta_stratified_batches: false # in all_anchors mode AllAnchorsBetaStratifiedBatchSampler is used
+                                 # automatically; this legacy flag is for single-phase non-anchors mode
+  run_readme: null               # null = no readme; pass a string to archive the run description
+  two_phase: true               # required; true = sequential phase1→phase2, false = single phase
+  train_phases: both            # "both" | "phase1" | "phase2" — override on CLI to skip phases
+
+  # ── Phase params: scalar = both phases; [p1, p2] = per-phase ────────────────
+  num_epochs: [150, 350]         # p1: diffusion convergence; p2: β head learning
+  lr: [1.0e-4, 1.0e-4]          # constant backbone lr matching Columbia DP (lr=1e-4)
+  lr_warmup_epochs: [5, 0]      # linear warmup from 0→lr; p2 needs none (backbone already warm)
+  beta_lr: [1.0e-3, 1.0e-3]     # β MLP lr; both phases train β (p1 stop_grad=true, p2 stop_grad=false)
+  warmstart_unet: [null, null]  # null = N/A (no DP warmstart; scratch train from ImageNet ResNet)
+  termination_loss_weight: [0.005, 0.005]  # λ; p1: stop_grad=true so ratio irrelevant for backbone; p2: ~10% ratio into obs encoder
+  termination_pos_weight: [10.0, 10.0]    # γ=10 compensates ~1:10 class imbalance in both phases
+  termination_stop_grad: [true, false]    # p1: β gradients stop at backbone; p2: flow into obs encoder
+  mask_diffusion_on_positive: false      # zero diffusion loss on β=1 examples; not needed
+  skip_diffusion_loss: [false, false]    # keep diffusion active in both phases (restoring force in p2)
+  all_anchors: true                      # enumerate ALL (segment, anchor_offset) pairs per epoch
+  best_checkpoint_metric: [loss_diffusion, loss_termination]
+                                # p1: save best by val diffusion loss
+                                # p2: save best by val β loss
+
+  # ── Phase-2-only param ──────────────────────────────────────────────────────
+  checkpoint: null               # null = auto-load phase1/best.ckpt; set explicit path to resume
 
 # --- Hierarchical eval (soda_runner / policy_loaders; not used during training) ---
 # Set both checkpoint paths after training (Modal Volume). CLI flags override yaml.
 inference:
-  beta_transition: 0.9     # terminate option when sigmoid(β) >= this threshold
+  beta_transition: 0.9    # terminate option when sigmoid(β) >= this threshold; binary labels → 0.5 is natural decision boundary
   beta_diffusion_t: 0      # diffusion timestep for β head at rollout (0 = clean plan)
-  high_checkpoint: null    # e.g. /experiments/train_high/soda_supervised/best.ckpt
-  low_checkpoint: null     # e.g. /experiments/train_low/soda_supervised/best.ckpt
+  high_checkpoint: /experiments/pusht/train_high/train_high_multianchor/best.ckpt
+  low_checkpoint: /experiments/pusht/train_low/soda_supervised/phase2/best.ckpt  # placeholder — set after training
 
 # --- Sim eval (modal_eval.py reads this block; train scripts ignore it) ---
 eval:

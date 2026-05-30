@@ -24,17 +24,22 @@ def build_eval_output_dir(
     experiments_root: Path,
     *,
     config_path: Path,
+    task: str | None = None,
     timestamp: datetime | None = None,
 ) -> tuple[Path, datetime]:
     """
-    ``{root}/eval/{config_stem}/{YYYYMMDD}/{HHMMSS}/``
+    ``{root}/{task}/eval/{config_stem}/{YYYYMMDD}/{HHMMSS}/``
 
     Returns ``(output_dir, timestamp)`` so callers reuse the same instant.
     """
+    from soda.experiments.paths import infer_task_slug
+
     ts = timestamp or datetime.now(timezone.utc)
     stem = config_stem_from_path(config_path)
+    task_slug = task or infer_task_slug(config_path=config_path)
     out = (
         Path(experiments_root)
+        / task_slug
         / "eval"
         / stem
         / ts.strftime("%Y%m%d")
@@ -44,9 +49,16 @@ def build_eval_output_dir(
 
 
 def run_dir_name_from_path(output_dir: Path, experiments_root: Path) -> str:
-    """Relative path under ``eval/`` for logs (e.g. ``dp_frozen/20260525/014851``)."""
+    """Relative path under ``{task}/eval/`` for logs (e.g. ``pusht/dp_frozen/20260525/014851``)."""
+    root = Path(experiments_root)
+    for task in ("pusht", "square"):
+        try:
+            rel = output_dir.relative_to(root / task / "eval")
+            return f"{task}/{rel.as_posix()}"
+        except ValueError:
+            continue
     try:
-        rel = output_dir.relative_to(Path(experiments_root) / "eval")
+        rel = output_dir.relative_to(root / "eval")
         return rel.as_posix()
     except ValueError:
         return output_dir.name

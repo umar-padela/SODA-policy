@@ -48,7 +48,7 @@ Checkpoint paths and eval settings live in that yaml; CLI flags override.
 | `modal run modal/modal_train_dp.py` | Train vanilla DP from `configs/pusht/dp.yaml` |
 | `modal run modal/modal_eval.py --config configs/pusht/dp.yaml` | Eval self-trained DP |
 
-Outputs: `/experiments/eval/<config_stem>/<YYYYMMDD>/<HHMMSS>/` on Volume **`soda-experiments`**:
+Outputs: `/experiments/{task}/eval/<config_stem>/<YYYYMMDD>/<HHMMSS>/` on Volume **`soda-experiments`**:
 
 - `config.yaml` — exact yaml snapshot used for the run
 - `run_manifest.json` — invoke command, CLI overrides, resolved eval settings
@@ -56,7 +56,7 @@ Outputs: `/experiments/eval/<config_stem>/<YYYYMMDD>/<HHMMSS>/` on Volume **`sod
 - `eval_log.json` — metrics + optional runner log
 - `media/*.mp4` — rollout videos named `{config_stem}_ep{idx}_seed{seed}_score{pct}.mp4`
 
-Example layout: `eval/dp_frozen/20260525/014851/`
+Example layout: `pusht/eval/dp_frozen/20260525/014851/`
 
 Legacy descriptive name (policy, horizon, checkpoint slug) is stored in `eval_log.json` as `descriptive_run_name`, not in the folder path.
 
@@ -66,9 +66,10 @@ The volume is mounted at `/experiments` **inside** Modal containers only. For `m
 
 ```powershell
 modal volume ls soda-experiments
-modal volume ls soda-experiments eval/dp_frozen
-modal volume get soda-experiments eval/dp_frozen/20260525/014851/media/dp_frozen_ep00_seed10000_score055.mp4 rollout.mp4
-modal volume get soda-experiments segment_rollout/seg0001_ep100_o0_reposition_anchor12345.mp4 rollout.mp4
+modal volume ls soda-experiments pusht
+modal volume ls soda-experiments pusht/eval/dp_frozen
+modal volume get soda-experiments pusht/eval/dp_frozen/20260525/014851/media/dp_frozen_ep00_seed10000_score055.mp4 rollout.mp4
+modal volume get soda-experiments pusht/segment_rollout/seg0001_ep100_o0_reposition_anchor12345.mp4 rollout.mp4
 ```
 
 You can also browse files in the [Modal dashboard](https://modal.com/storage) → Volume `soda-experiments`.

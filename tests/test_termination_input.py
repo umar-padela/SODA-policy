@@ -39,4 +39,4 @@ def test_compute_loss_uses_termination_features_helper():
 
     source = inspect.getsource(lp_mod._build_low_policy_class)
     assert "termination_features_from_batch" in source
-    assert "predict_termination_logit(term_features)" in source
+    assert "predict_termination_logit(term_features" in source

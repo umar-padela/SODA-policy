@@ -3,8 +3,7 @@
 from soda.models.high_policy import (
     HighPolicy,
     HighPolicyConfig,
-    OptionFlowMatchingSchedule,
-    OptionVelocityMLP,
+    OptionClassifier,
     ObsEncoder,
 )
 from soda.models.low_policy import LowPolicyConfig
@@ -19,8 +18,7 @@ __all__ = [
     "HighPolicyConfig",
     "LowPolicy",
     "LowPolicyConfig",
-    "OptionFlowMatchingSchedule",
-    "OptionVelocityMLP",
+    "OptionClassifier",
     "ObsEncoder",
     "TerminationHead",
     "TerminationHeadConfig",

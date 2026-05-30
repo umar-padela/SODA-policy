@@ -41,11 +41,17 @@ def termination_bce_loss(
     beta_label: torch.Tensor,
     *,
     pos_weight: float | torch.Tensor | None = None,
+    label_smoothing: float = 0.0,
 ) -> torch.Tensor:
-    """BCE on termination logits vs ``beta_label`` ``{0, 1}``."""
-    return termination_bce_from_logits(
-        beta_logit, beta_label, pos_weight=pos_weight
-    )
+    """BCE on termination logits vs binary ``beta_label`` with optional label smoothing.
+
+    Label smoothing maps 0 → ε and 1 → 1−ε, preventing logit saturation while
+    keeping binary terminal-state semantics.
+    """
+    label = beta_label.float()
+    if label_smoothing > 0.0:
+        label = label * (1.0 - label_smoothing) + (1.0 - label) * label_smoothing
+    return termination_bce_from_logits(beta_logit, label, pos_weight=pos_weight)
 
 
 def termination_bce_loss_per_sample(
@@ -53,10 +59,14 @@ def termination_bce_loss_per_sample(
     beta_label: torch.Tensor,
     *,
     pos_weight: float | torch.Tensor | None = None,
+    label_smoothing: float = 0.0,
 ) -> torch.Tensor:
-    """Per-batch-item BCE, shape ``(B,)``."""
+    """Per-batch-item BCE with optional label smoothing, shape ``(B,)``."""
     if beta_logit.ndim > 1:
         beta_logit = beta_logit.squeeze(-1)
+    label = beta_label.float()
+    if label_smoothing > 0.0:
+        label = label * (1.0 - label_smoothing) + (1.0 - label) * label_smoothing
     kwargs: dict[str, torch.Tensor] = {}
     if pos_weight is not None:
         if not torch.is_tensor(pos_weight):
@@ -65,7 +75,7 @@ def termination_bce_loss_per_sample(
             )
         kwargs["pos_weight"] = pos_weight.reshape(1)
     return F.binary_cross_entropy_with_logits(
-        beta_logit, beta_label.float(), reduction="none", **kwargs
+        beta_logit, label, reduction="none", **kwargs
     )
 
 
@@ -156,6 +166,16 @@ def beta_metrics_from_counts(
             precision_at
         ),
     }
+
+
+def beta_mae_from_logits(
+    beta_logit: torch.Tensor,
+    beta_label: torch.Tensor,
+) -> tuple[float, int]:
+    """MAE between sigmoid(logit) and linear beta labels. Returns (sum_abs_err, count)."""
+    prob = torch.sigmoid(beta_logit.reshape(-1))
+    label = beta_label.reshape(-1).float()
+    return float((prob - label).abs().sum().item()), int(label.numel())
 
 
 def low_policy_total_loss(

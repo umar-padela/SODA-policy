@@ -13,7 +13,41 @@ Examples (repo root):
     --config configs/pusht/soda_supervised.yaml --n-test 1
 """
 
+from pathlib import Path
+
+import modal
+
 from modal_config import app, eval_run, spawn_modal_function
+from soda.experiments.paths import MODAL_VOLUME_NAME, volume_relative_path
+
+
+def _download_eval_files(result: dict, local_save_path: str) -> None:
+    """Download eval MP4s, eval_log.json, and README to a local directory."""
+    local_dir = Path(local_save_path)
+    local_dir.mkdir(parents=True, exist_ok=True)
+
+    remote_paths: list[str] = []
+    if result.get("output_dir"):
+        rel = volume_relative_path(result["output_dir"])
+        remote_paths.append(f"{rel}/eval_log.json")
+        remote_paths.append(f"{rel}/README.md")
+
+    for path in (result.get("metrics") or {}).get("video_paths") or []:
+        remote_paths.append(volume_relative_path(path))
+
+    vol = modal.Volume.from_name(MODAL_VOLUME_NAME)
+    downloaded = 0
+    for remote in remote_paths:
+        local_file = local_dir / Path(remote).name
+        try:
+            data = b"".join(vol.read_file(remote))
+            local_file.write_bytes(data)
+            print(f"  downloaded: {local_file}")
+            downloaded += 1
+        except Exception:
+            print(f"  skipped (not found on volume): {remote}")
+
+    print(f"Downloaded {downloaded} file(s) → {local_dir.resolve()}")
 
 
 def _build_invoke_command(
@@ -30,6 +64,7 @@ def _build_invoke_command(
     n_test_vis: int | None,
     ckpt_slug: str | None,
     no_video: bool,
+    local_save_path: str | None,
 ) -> str:
     parts = ["modal run modal/modal_eval.py", f'--run-readme "{run_readme}"', f"--config {config}"]
     if full:
@@ -52,6 +87,8 @@ def _build_invoke_command(
         parts.append(f"--ckpt-slug {ckpt_slug}")
     if no_video:
         parts.append("--no-video")
+    if local_save_path:
+        parts.append(f"--local-save-path {local_save_path}")
     return " ".join(parts)
 
 
@@ -69,6 +106,7 @@ def main(
     n_test_vis: int | None = None,
     ckpt_slug: str | None = None,
     no_video: bool = False,
+    local_save_path: str | None = None,
 ):
     """
     Run Push-T eval on Modal.
@@ -99,6 +137,7 @@ def main(
         n_test_vis=n_test_vis,
         ckpt_slug=ckpt_slug,
         no_video=no_video,
+        local_save_path=local_save_path,
     )
     result = spawn_modal_function(
         eval_run,
@@ -137,3 +176,7 @@ def main(
         for path in videos:
             print(f"    {path}")
     print("Done. See eval_log.json, README.md, and media/*.mp4 on Modal Volume soda-experiments.")
+
+    if local_save_path:
+        print(f"\nDownloading output files to {local_save_path} ...")
+        _download_eval_files(result, local_save_path)

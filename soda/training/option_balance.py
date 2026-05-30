@@ -78,11 +78,22 @@ def compute_termination_pos_weight(
     option_ids: np.ndarray,
     episode_ends: np.ndarray,
     train_episode_mask: np.ndarray,
+    *,
+    escape_relabeling: bool = False,
+    num_options: int = 1,
 ) -> tuple[float, int, int]:
     """
     ``gamma = (# beta=0 frames) / (# beta=1 frames)`` on train episodes.
 
     One positive beta label per option segment end (``derive_beta_labels``).
+
+    When ``escape_relabeling=True`` (expand-all with K=``num_options`` options),
+    each real frame generates K samples: 1 real + K-1 escape (all β=1). The
+    effective counts are adjusted accordingly so pos_weight balances the actual
+    training distribution:
+      n_neg_eff  = n_neg_real          (only real non-terminal frames stay β=0)
+      n_pos_eff  = n_pos_real * K + n_neg_real * (K-1)
+      gamma      = n_neg_eff / n_pos_eff
     """
     from soda.dataset.option_aware_dataset import derive_beta_labels
 
@@ -99,6 +110,13 @@ def compute_termination_pos_weight(
     if n_pos == 0:
         raise ValueError("No positive beta labels in train episodes")
     n_neg = int(len(beta_train) - n_pos)
+
+    if escape_relabeling and num_options > 1:
+        K = int(num_options)
+        n_neg_eff = n_neg
+        n_pos_eff = n_pos * K + n_neg * (K - 1)
+        return float(n_neg_eff) / float(n_pos_eff), n_neg_eff, n_pos_eff
+
     return float(n_neg) / float(n_pos), n_neg, n_pos
 
 
@@ -123,12 +141,20 @@ def resolve_termination_pos_weight(
     option_ids: np.ndarray,
     episode_ends: np.ndarray,
     train_episode_mask: np.ndarray,
+    escape_relabeling: bool = False,
+    num_options: int = 1,
 ) -> tuple[float, int, int, bool]:
-    """Resolve ``termination_pos_weight`` from yaml or train beta label counts."""
+    """Resolve ``termination_pos_weight`` from yaml or train beta label counts.
+
+    Pass ``escape_relabeling=True`` and ``num_options=K`` to get the correct
+    auto pos_weight for expand-all positive_negative training.
+    """
     if configured is not None:
         return float(configured), 0, 0, True
     gamma, n_neg, n_pos = compute_termination_pos_weight(
-        option_ids, episode_ends, train_episode_mask
+        option_ids, episode_ends, train_episode_mask,
+        escape_relabeling=escape_relabeling,
+        num_options=num_options,
     )
     return gamma, n_neg, n_pos, False
 

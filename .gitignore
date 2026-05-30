@@ -233,6 +233,10 @@ tmp/
 data/processed/
 experiments/*
 !experiments/README.md
+!experiments/final_experiments/
+experiments/final_experiments/**/*.ckpt
+experiments/final_experiments/**/*.pt
+experiments/final_experiments/**/*.mp4
 data/raw/square/
 pushT_options_labeled/
 

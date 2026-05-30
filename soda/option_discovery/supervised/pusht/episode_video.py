@@ -7,22 +7,35 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Sequence
 
 import cv2
 import numpy as np
 import zarr
 
+from soda.option_discovery.supervised.pusht.frame_overlays import (
+    SKILL_COLORS_BGR,
+    burn_frame_number,
+    burn_state_overlay,
+)
 from soda.option_discovery.supervised.pusht.heuristics import SKILL_NAMES
 
-# OpenCV uses BGR; matches histogram colors in visualize_labels (blue/green/orange)
-SKILL_COLORS_BGR: dict[int, tuple[int, int, int]] = {
-    0: (255, 0, 0),
-    1: (0, 255, 0),
-    2: (0, 165, 255),
-}
-
 PUSHT_FPS = 10
+
+# Back-compat re-exports
+__all__ = [
+    "PUSHT_FPS",
+    "SKILL_COLORS_BGR",
+    "SKILL_NAMES",
+    "burn_frame_number",
+    "burn_state_overlay",
+    "compile_frames_to_mp4",
+    "compile_frames_to_grid",
+    "episode_bounds",
+    "extract_episode_frames_zarr",
+    "open_video",
+    "render_episode_video",
+]
 
 
 def episode_bounds(episode_ends: np.ndarray, episode_idx: int) -> tuple[int, int]:
@@ -51,71 +64,6 @@ def extract_episode_frames_zarr(
     state = np.asarray(root["data"]["state"][start:end], dtype=np.float32)
     labels = np.asarray(root["data"][label_key][start:end], dtype=np.int32)
     return frames, state, labels, fps
-
-
-def burn_frame_number(frame: np.ndarray, index: int) -> np.ndarray:
-    """Frame index in top-left (red)."""
-    display = frame.copy()
-    cv2.putText(
-        display,
-        str(index),
-        (4, 8),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.22,
-        (255, 0, 0),
-        1,
-        cv2.LINE_AA,
-    )
-    return display
-
-
-def burn_state_overlay(
-    frame: np.ndarray,
-    state_vector: np.ndarray,
-    label: int,
-    skill_names: Mapping[int, str] | None = None,
-    skill_colors: Mapping[int, tuple[int, int, int]] | None = None,
-) -> np.ndarray:
-    """Agent/block/rotation text, skill border, and skill name on a 96x96 frame."""
-    skill_names = skill_names or SKILL_NAMES
-    skill_colors = skill_colors or SKILL_COLORS_BGR
-    display = frame.copy()
-    font = cv2.FONT_HERSHEY_SIMPLEX
-    font_scale = 0.22
-    thickness = 1
-
-    ax, ay, bx, by, rot = np.round(state_vector.astype(float), 2)
-    lines = [
-        (f"A:{ax:.2f},{ay:.2f}", (0, 255, 0)),
-        (f"B:{bx:.2f},{by:.2f}", (0, 255, 255)),
-        (f"R:{rot:.2f}", (0, 0, 0)),
-    ]
-    for i, (text, color) in enumerate(lines):
-        cv2.putText(
-            display,
-            text,
-            (16, 8 + i * 10),
-            font,
-            font_scale,
-            color,
-            thickness,
-            cv2.LINE_AA,
-        )
-
-    skill_color = skill_colors.get(int(label), (255, 255, 255))
-    skill_name = skill_names.get(int(label), "UNKNOWN")
-    cv2.rectangle(display, (0, 0), (95, 95), skill_color, 2)
-    cv2.putText(
-        display,
-        f"S:{skill_name}",
-        (4, 80),
-        font,
-        font_scale,
-        skill_color,
-        thickness,
-        cv2.LINE_AA,
-    )
-    return display
 
 
 def compile_frames_to_mp4(

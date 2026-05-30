@@ -1,10 +1,18 @@
 """
 Local entrypoint — train π_low on Modal.
 
-  modal run modal/modal_train_low.py --run-readme "A2 smoke: 25 epochs supervised pi_low"
-  modal run modal/modal_train_low.py --config-name soda_supervised --task pusht --run-readme "..."
-  modal run modal/modal_train_low.py --hydra-overrides "train_low.num_epochs=3" --run-readme "..."
-  modal run modal/modal_train_low.py --detach --run-readme "..."
+  modal run modal/modal_train_low.py --run-readme "..."          # live logs; job dies if terminal closes
+  modal run --detach modal/modal_train_low.py --run-readme "..." # live logs; job survives if terminal closes
+
+The ``--detach`` flag MUST come before the script path to be interpreted as a
+Modal CLI flag.  Placed after the script it becomes a function argument instead
+and has no effect on job survival — a common mistake.
+
+``--detach`` behaviour:
+  without: Modal stops the ephemeral app when this entrypoint exits → job killed.
+  with:    Modal keeps the spawned job running after the local client disconnects.
+           The entrypoint still blocks (showing live logs) until you close the
+           terminal or Ctrl-C; the remote job then continues independently.
 
 Remote: ``modal_config.train_low`` → ``python soda/training/train_low.py`` on GPU.
 Canonical checkpoints: ``/experiments/train_low/{config_name}/`` on Volume ``soda-experiments``.
@@ -18,19 +26,16 @@ def _build_invoke_command(
     *,
     config_name: str,
     task: str,
-    detach: bool,
     hydra_overrides: str,
     run_readme: str,
 ) -> str:
     parts = [
-        "modal run modal/modal_train_low.py",
+        "modal run --detach modal/modal_train_low.py",
         f"--config-name {config_name}",
         f"--task {task}",
     ]
     if hydra_overrides.strip():
         parts.append(f'--hydra-overrides "{hydra_overrides.strip()}"')
-    if detach:
-        parts.append("--detach")
     parts.append(f'--run-readme "{run_readme}"')
     return " ".join(parts)
 
@@ -40,21 +45,19 @@ def main(
     run_readme: str,
     config_name: str = "soda_supervised",
     task: str = "pusht",
-    detach: bool = False,
     hydra_overrides: str = "",
 ) -> None:
     overrides = [part for part in hydra_overrides.split() if part.strip()] if hydra_overrides else []
     invoke_command = _build_invoke_command(
         config_name=config_name,
         task=task,
-        detach=detach,
         hydra_overrides=hydra_overrides,
         run_readme=run_readme,
     )
     spawn_modal_function(
         train_low,
         label=f"train_low:{task}/{config_name}",
-        wait=not detach,
+        wait=True,
         config_name=config_name,
         task=task,
         hydra_overrides=overrides or None,

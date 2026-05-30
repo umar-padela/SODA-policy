@@ -60,7 +60,7 @@ class EvalConfig:
     overlap_checkpoints: tuple[int, ...] = DEFAULT_OVERLAP_CHECKPOINTS
     n_test: int = 5
     n_train: int = 0
-    test_start_seed: int = 10000
+    test_start_seed: int = 100000
     train_start_seed: int = 0
     show_progress: bool = True
     record_video: bool = True
@@ -197,7 +197,7 @@ def build_eval_config_from_yaml(
         else _cfg_get(eval_block, "n_test_vis", None)
     )
 
-    test_start_seed = 10000
+    test_start_seed = 100000
     if env_runner is not None:
         test_start_seed = int(_cfg_get(env_runner, "test_start_seed", test_start_seed))
 

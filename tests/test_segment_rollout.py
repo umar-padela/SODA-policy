@@ -127,15 +127,13 @@ def test_zarr_pusht_env_state_dim():
 
 
 @pytest.mark.skipif(not PUSHT_ZARR.is_dir(), reason="pusht.zarr not present")
-def test_pusht_env_state_adds_pi_to_block_angle():
+def test_pusht_env_state_matches_zarr():
     store = ZarrSegmentStore.open(PUSHT_ZARR)
     seg = store.segments[0]
     raw = np.asarray(store.state[seg.start], dtype=np.float64).reshape(-1)
     sim = store.pusht_env_state(seg.start)
     assert sim.shape == (5,)
-    assert np.allclose(sim[:4], raw[:4])
-    expected = (raw[4] + np.pi) % (2 * np.pi)
-    assert np.isclose(sim[4], expected)
+    assert np.allclose(sim, raw)
 
 
 @pytest.mark.skipif(not PUSHT_ZARR.is_dir(), reason="pusht.zarr not present")

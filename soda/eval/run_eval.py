@@ -56,10 +56,11 @@ def resolve_eval_output_dir(
     *,
     timestamp: datetime | None = None,
 ) -> tuple[Path, datetime]:
-    """Build ``{root}/eval/{config_stem}/{YYYYMMDD}/{HHMMSS}/``."""
+    """Build ``{root}/{task}/eval/{config_stem}/{YYYYMMDD}/{HHMMSS}/``."""
     return build_eval_output_dir(
         experiments_root,
         config_path=config.config_path,
+        task=config.task,
         timestamp=timestamp,
     )
 

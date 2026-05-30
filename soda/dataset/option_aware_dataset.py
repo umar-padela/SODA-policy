@@ -23,7 +23,7 @@ from numpy.typing import ArrayLike
 from soda.dataset.temporal_stretch import TemporalStretcher
 
 # Version string for optional processed caches (bump if derivation rule changes).
-DERIVE_BETA_LABELS_VERSION = "v1_last_frame_of_segment"
+DERIVE_BETA_LABELS_VERSION = "v2_binary_last_frame"
 
 
 @dataclass(frozen=True)
@@ -45,13 +45,13 @@ def derive_beta_labels(
     episode_ends: ArrayLike,
 ) -> np.ndarray:
     """
-    Derive termination supervision ``beta_label`` from discrete option ids.
+    Binary termination label: 0.0 for every frame except the last frame of each
+    option segment, which gets 1.0.
 
-    For each episode (as defined by cumulative ``episode_ends``), every
-    contiguous run of the same option id is one skill segment. The **last
-    frame of each segment** gets ``beta_label = 1``; all other frames get
-    ``0``. This marks "skill completion / handoff" for BCE training of
-    ``beta_omega(s)``.
+    Binary labels force β to learn visual terminal-state recognition (not temporal
+    fraction), which is the correct inductive bias for obs-based termination.
+    Label smoothing in the loss prevents logit saturation; pos_weight handles the
+    class imbalance (~1 positive per segment of average length 17).
     """
     options = np.asarray(option_ids).reshape(-1)
     ends = np.asarray(episode_ends, dtype=np.int64).reshape(-1)
@@ -71,15 +71,16 @@ def derive_beta_labels(
         raise ValueError("episode_ends must be strictly increasing positive cumsums")
 
     beta = np.zeros(options.shape[0], dtype=np.float32)
-    start = 0
+    ep_start = 0
     for ep_end in ends:
-        segment = options[start:ep_end]
+        segment = options[ep_start:ep_end]
         n = segment.shape[0]
         if n > 0:
             change_at = np.flatnonzero(segment[:-1] != segment[1:])
-            last_frames = np.concatenate([change_at, [n - 1]])
-            beta[start + last_frames] = 1.0
-        start = int(ep_end)
+            seg_ends_rel = np.concatenate([change_at, [n - 1]])
+            for seg_end_rel in seg_ends_rel:
+                beta[ep_start + int(seg_end_rel)] = 1.0
+        ep_start = int(ep_end)
 
     return beta
 
@@ -246,6 +247,8 @@ class OptionAwareDataset:
         max_train_episodes: int | None = None,
         train: bool = True,
         random_anchor: bool = True,
+        all_anchors: bool = False,
+        escape_relabeling: bool = False,
     ) -> None:
         import zarr
 
@@ -257,11 +260,14 @@ class OptionAwareDataset:
         self.n_obs_steps = int(n_obs_steps)
         self.min_segment_len = int(min_segment_len)
         self.random_anchor = bool(random_anchor)
+        self._all_anchors = bool(all_anchors)
         self._stratified_encoded_indices = False
         self._val_ratio = float(val_ratio)
         self._seed = int(seed)
         self._max_train_episodes = max_train_episodes
         self._rng = np.random.default_rng(seed)
+        # escape_relabeling only applies to train split — silently disabled for val.
+        self.escape_relabeling = bool(escape_relabeling) and bool(train)
 
         root = zarr.open(str(self.zarr_path), mode="r")
         data = root["data"]
@@ -280,6 +286,7 @@ class OptionAwareDataset:
         self._option_ids = np.asarray(data[option_id_key][:])
         self._episode_ends = np.asarray(meta["episode_ends"][:], dtype=np.int64)
         self._beta_labels = derive_beta_labels(self._option_ids, self._episode_ends)
+        self.num_options = int(len(np.unique(self._option_ids)))
 
         all_segments = build_option_segment_index(
             self._option_ids,
@@ -315,6 +322,36 @@ class OptionAwareDataset:
                 f"No segments after {'train' if train else 'val'} episode mask"
             )
 
+        if self.escape_relabeling and not self._all_anchors:
+            raise ValueError(
+                "escape_relabeling=True requires all_anchors=True so every "
+                "(segment, anchor) pair is enumerated and expanded."
+            )
+
+        # all_anchors: enumerate every valid (segment, anchor_frame) pair up front.
+        # With escape_relabeling, each real pair is expanded to K tuples:
+        #   (seg_idx, anchor, option_id_override, is_escape)
+        # Without escape_relabeling, 2-tuples are used for backward compatibility.
+        if self._all_anchors:
+            if self.escape_relabeling:
+                self._samples: list[tuple] = []
+                for seg_idx, seg in enumerate(self.segments):
+                    for anchor in range(seg.start, seg.end):
+                        # Real sample (correct option)
+                        self._samples.append((seg_idx, anchor, seg.option_id, False))
+                        # K-1 escape samples (wrong option → β=1)
+                        for wrong_opt in range(self.num_options):
+                            if wrong_opt != seg.option_id:
+                                self._samples.append((seg_idx, anchor, wrong_opt, True))
+            else:
+                self._samples = [
+                    (seg_idx, anchor)
+                    for seg_idx, seg in enumerate(self.segments)
+                    for anchor in range(seg.start, seg.end)
+                ]
+        else:
+            self._samples = []
+
     def enable_stratified_indices(self, enabled: bool = True) -> None:
         """
         When True, ``__getitem__`` accepts encoded indices from
@@ -322,13 +359,17 @@ class OptionAwareDataset:
         """
         self._stratified_encoded_indices = bool(enabled)
 
-    def get_validation_dataset(self) -> OptionAwareDataset:
+    def get_validation_dataset(self, *, all_anchors: bool = False) -> OptionAwareDataset:
         """Validation split (complement of train episode mask).
 
         Uses the same ``seed`` as train so ``episode_train_mask`` picks one val
         set and val takes ``~train_mask`` (disjoint partition). Do not offset
         ``seed`` here — that would define a different val split and leak episodes
         into both train and val.
+
+        Pass ``all_anchors=True`` when train also uses all_anchors so val sees
+        every (segment, anchor) pair each epoch — deterministic and consistent
+        with the training distribution.
         """
         return OptionAwareDataset(
             zarr_path=self.zarr_path,
@@ -341,9 +382,13 @@ class OptionAwareDataset:
             max_train_episodes=self._max_train_episodes,
             train=False,
             random_anchor=self.random_anchor,
+            all_anchors=all_anchors,
+            escape_relabeling=False,  # val always uses real labels
         )
 
     def __len__(self) -> int:
+        if self._all_anchors:
+            return len(self._samples)
         return len(self.segments)
 
     def _obs_window(self, seg: OptionSegment, anchor: int) -> dict[str, np.ndarray]:
@@ -356,27 +401,48 @@ class OptionAwareDataset:
 
         from soda.dataset.option_stratified_sampler import decode_stratified_index
 
-        at_segment_end: bool | None = None
-        if self._stratified_encoded_indices:
-            seg_idx, at_segment_end = decode_stratified_index(index)
+        is_escape = False
+        if self._all_anchors:
+            sample = self._samples[index]
+            if len(sample) == 4:
+                # escape_relabeling=True: 4-tuple (seg_idx, anchor, option_id_override, is_escape)
+                seg_idx, anchor, option_id_out, is_escape = sample
+            else:
+                seg_idx, anchor = sample
+                option_id_out = None  # filled below from seg
             seg = self.segments[seg_idx]
+            if option_id_out is None:
+                option_id_out = seg.option_id
         else:
-            seg = self.segments[index]
+            at_segment_end: bool | None = None
+            if self._stratified_encoded_indices:
+                seg_idx, at_segment_end = decode_stratified_index(index)
+                seg = self.segments[seg_idx]
+            else:
+                seg = self.segments[index]
 
-        if at_segment_end is True:
-            anchor = seg.end - 1
-        elif at_segment_end is False:
-            anchor = int(self._rng.integers(seg.start, seg.end))
-        elif self.random_anchor:
-            anchor = int(self._rng.integers(seg.start, seg.end))
-        else:
-            anchor = seg.end - 1
+            if at_segment_end is True:
+                anchor = seg.end - 1
+            elif at_segment_end is False:
+                anchor = int(self._rng.integers(seg.start, seg.end))
+            elif self.random_anchor:
+                anchor = int(self._rng.integers(seg.start, seg.end))
+            else:
+                anchor = seg.end - 1
+            option_id_out = seg.option_id
 
         obs = self._obs_window(seg, anchor)
         actions_native = native_actions_from_anchor(self._action, seg, anchor)
         action = self._stretcher.stretch_with_duration(actions_native)
-        beta = float(self._beta_labels[anchor])
+        # Escape examples always have beta=1; real examples use stored labels.
+        beta = 1.0 if is_escape else float(self._beta_labels[anchor])
         remaining_len = int(seg.end - anchor)
+
+        # Normalized progress within the segment [0, 1]: 0 at segment start, 1 at last frame.
+        # Gives β a temporal position signal without requiring action history.
+        seg_len = seg.length
+        chunk_cursor = float(anchor - seg.start) / max(seg_len - 1, 1)
+        chunk_cursor = min(max(chunk_cursor, 0.0), 1.0)
 
         return {
             "obs": {
@@ -384,13 +450,33 @@ class OptionAwareDataset:
                 "agent_pos": torch.from_numpy(obs["agent_pos"]),
             },
             "action": torch.from_numpy(action),
-            "option_id": torch.tensor(seg.option_id, dtype=torch.long),
+            "option_id": torch.tensor(option_id_out, dtype=torch.long),
             "beta_label": torch.tensor(beta, dtype=torch.float32),
+            "is_escape": torch.tensor(is_escape, dtype=torch.bool),
+            "chunk_cursor": torch.tensor(chunk_cursor, dtype=torch.float32),
             "segment_length": torch.tensor(remaining_len, dtype=torch.long),
             "segment_start": seg.start,
             "segment_end": seg.end,
             "anchor_index": anchor,
         }
+
+    def get_beta_sample_indices(self) -> tuple[list[int], list[int]]:
+        """Return ``(pos_indices, neg_indices)`` for :class:`AllAnchorsBetaStratifiedBatchSampler`.
+
+        pos_indices: flat dataset indices where beta_label == 1 (segment-end anchors).
+        neg_indices: flat dataset indices where beta_label == 0 (mid-segment anchors).
+        Only valid when ``all_anchors=True``.
+        """
+        if not self._all_anchors:
+            raise ValueError("get_beta_sample_indices requires all_anchors=True")
+        pos: list[int] = []
+        neg: list[int] = []
+        for i, (_, anchor) in enumerate(self._samples):
+            if self._beta_labels[anchor] == 1.0:
+                pos.append(i)
+            else:
+                neg.append(i)
+        return pos, neg
 
     def get_option_segment_bounds(self) -> list[tuple[int, int, int]]:
         """``(start, end, option_id)`` per segment for ``train_high`` / flow matching."""
@@ -467,5 +553,7 @@ def build_option_dataset_from_config(cfg: Any) -> OptionAwareDataset:
         max_train_episodes=_config_get(ds_cfg, "max_train_episodes", None),
         train=bool(_config_get(ds_cfg, "train", True)),
         random_anchor=bool(_config_get(ds_cfg, "random_anchor", True)),
+        all_anchors=bool(_config_get(ds_cfg, "all_anchors", False)),
+        escape_relabeling=bool(_config_get(ds_cfg, "escape_relabeling", False)),
     )
     return dataset

@@ -38,6 +38,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from soda.eval.eval_yaml import resolve_eval_config_path
+from soda.experiments.paths import infer_task_slug, segment_rollout_dir
 from soda.eval.segment_rollout import (
     run_representative_segment_rollouts,
     run_segment_rollout_from_cli,
@@ -128,13 +129,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--max-steps",
         type=int,
         default=None,
-        help="Cap rollout length (default: remaining expert segment length)",
+        help="Cap rollout length (default: max(segment_length, 50) — policy always gets at least 50 frames)",
     )
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("experiments/segment_rollout"),
-        help="Directory for MP4 + metrics JSON",
+        default=None,
+        help="Directory for MP4 + metrics JSON (default: experiments/{task}/segment_rollout/)",
     )
     parser.add_argument("--no-video", action="store_true")
     parser.add_argument(
@@ -149,6 +150,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     config_path = resolve_eval_config_path(args.config)
+    output_dir = args.output_dir or Path(
+        segment_rollout_dir(infer_task_slug(config_path=config_path))
+    )
 
     if args.list_segments:
         store = ZarrSegmentStore.open(args.zarr_path, label_key=args.label_key)
@@ -187,7 +191,7 @@ def main(argv: list[str] | None = None) -> int:
             device=args.device,
             n_action_steps=args.n_action_steps,
             max_steps=args.max_steps,
-            output_dir=args.output_dir,
+            output_dir=output_dir,
             no_video=args.no_video,
         )
         print(f"Representative segment rollouts complete ({len(results)} total)")
@@ -215,7 +219,7 @@ def main(argv: list[str] | None = None) -> int:
         device=args.device,
         n_action_steps=args.n_action_steps,
         max_steps=args.max_steps,
-        output_dir=args.output_dir,
+        output_dir=output_dir,
         no_video=args.no_video,
     )
 

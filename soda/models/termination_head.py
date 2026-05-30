@@ -27,6 +27,8 @@ class TerminationHeadConfig:
     bottleneck_dim: int
     hidden_dim: int
     num_layers: int
+    use_chunk_cursor: bool = False  # if True, concatenate a scalar cursor ∈ [0,1] to features
+    dropout_rate: float = 0.0       # dropout after each hidden Mish; 0.0 = disabled
 
 
 class TerminationHead(nn.Module):
@@ -49,28 +51,37 @@ class TerminationHead(nn.Module):
         if cfg.num_layers < 1:
             raise ValueError(f"num_layers must be >= 1, got {cfg.num_layers}")
 
-        layers: list[nn.Module] = [
-            nn.Linear(cfg.bottleneck_dim, cfg.hidden_dim),
-            nn.Mish(),
-        ]
+        input_dim = cfg.bottleneck_dim + (1 if cfg.use_chunk_cursor else 0)
+
+        def _block(in_dim: int, out_dim: int) -> list[nn.Module]:
+            mods: list[nn.Module] = [nn.Linear(in_dim, out_dim), nn.Mish()]
+            if cfg.dropout_rate > 0.0:
+                mods.append(nn.Dropout(cfg.dropout_rate))
+            return mods
+
+        layers: list[nn.Module] = _block(input_dim, cfg.hidden_dim)
         for _ in range(cfg.num_layers - 1):
-            layers.extend(
-                [
-                    nn.Linear(cfg.hidden_dim, cfg.hidden_dim),
-                    nn.Mish(),
-                ]
-            )
+            layers.extend(_block(cfg.hidden_dim, cfg.hidden_dim))
         layers.append(nn.Linear(cfg.hidden_dim, 1))
         self.mlp = nn.Sequential(*layers)
 
-    def forward(self, bottleneck: torch.Tensor, *, stop_grad: bool = True) -> torch.Tensor:
+    def forward(
+        self,
+        bottleneck: torch.Tensor,
+        *,
+        stop_grad: bool = True,
+        chunk_cursor: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """
         Parameters
         ----------
         bottleneck
-            U-Net bottleneck features ``(B, bottleneck_dim)``.
+            Features ``(B, bottleneck_dim)`` — obs+option or U-Net bottleneck.
         stop_grad
-            If True (default), apply ``bottleneck.detach()`` before MLP (locked §8).
+            If True, detach features before MLP so β gradient does not reach the backbone.
+        chunk_cursor
+            Optional ``(B,)`` or ``(B, 1)`` scalar ∈ [0, 1]: normalized progress within
+            the current option segment. Concatenated to features when ``use_chunk_cursor=True``.
 
         Returns
         -------
@@ -78,11 +89,16 @@ class TerminationHead(nn.Module):
             ``(B,)`` pre-sigmoid termination logit.
         """
         feat = bottleneck.detach() if stop_grad else bottleneck
+        if self.cfg.use_chunk_cursor and chunk_cursor is not None:
+            cursor = chunk_cursor.to(dtype=feat.dtype, device=feat.device)
+            if cursor.dim() == 1:
+                cursor = cursor.unsqueeze(-1)
+            feat = torch.cat([feat, cursor], dim=-1)
         return self.mlp(feat).squeeze(-1)
 
-    def predict_beta(self, bottleneck: torch.Tensor) -> torch.Tensor:
+    def predict_beta(self, bottleneck: torch.Tensor, chunk_cursor: torch.Tensor | None = None) -> torch.Tensor:
         """Termination probability in ``(0, 1)`` for inference / logging."""
-        return torch.sigmoid(self.forward(bottleneck, stop_grad=True))
+        return torch.sigmoid(self.forward(bottleneck, stop_grad=True, chunk_cursor=chunk_cursor))
 
 
 def termination_bce_from_logits(

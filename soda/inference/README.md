@@ -6,7 +6,9 @@ Runtime policy logic: how trained π_high and π_low are composed at **decision 
 
 | File | Purpose |
 |------|---------|
-| [`hierarchical_controller.py`](hierarchical_controller.py) | `HierarchicalPolicy` — option loop + β + chunk cache |
+| [`low_level_executor.py`](low_level_executor.py) | `LowLevelChunkExecutor` — shared π_low cache, β, native chunk execute |
+| [`fixed_option_low_controller.py`](fixed_option_low_controller.py) | Fixed-ω wrapper for segment rollouts |
+| [`hierarchical_controller.py`](hierarchical_controller.py) | `HierarchicalPolicy` — π_high + executor |
 
 ## `HierarchicalPolicy`
 
@@ -23,24 +25,23 @@ Constructed by [`load_soda_policy_and_cfg`](../eval/policy_loaders.py) after loa
 
 Called **once per env step** (runner executes a single action per call):
 
-1. **β** — if a cached chunk exists: `pi_low.predict_beta(obs, ω, cached_action_pred, t=0)` → termination head
-2. **Resample ω** if `β > beta_transition`
-3. **Replan diffusion** if no cache, β fired, or `cursor >= n_action_steps` (eval yaml)
-4. **On replan:** `pi_low.predict_action` → cache full horizon chunk + `action_pred`
-5. **Return** next row from cached chunk (duration channel stripped for env)
+1. **β** — every step (including immediately after replan): `pi_low.predict_beta(obs, ω, cached_action_pred, t=0)`
+2. **Resample ω** if `β > beta_transition` (segment exit — only way to leave current low-level segment)
+3. **Replan diffusion** if cache is empty or the decompressed native chunk is exhausted (same ω)
+4. **Return** next row from `action_unstretched`
 
-Training predicts a **full action chunk** (variable horizon for SODA). The execute window before replanning is **`HierarchicalPolicyConfig.n_action_steps`** from eval yaml (**default 8**, receding-horizon — same protocol as vanilla DP).
+Low-level segments are **not** capped at `n_action_steps` when a native chunk is available — the full decompressed chunk runs out before replanning. If the chunk is shorter than 8 steps and β has not fired, π_low replans under the same ω.
 
 ### Parameters
 
 | Field | Scope | Default | Meaning |
 |-------|-------|---------|---------|
-| `n_action_steps` | **eval** | 8 | Execute window before diffusion replan (h=8) |
+| `n_action_steps` | **eval** | 8 | Legacy DP yaml field; native SODA execute uses full decoded chunk length |
 | `beta_transition` | eval | 0.5 | Segment ends when β exceeds this |
 | `beta_diffusion_t` | eval | 0 | Diffusion timestep for cheap β forward |
 | `env_action_dim` | eval | 2 | Push-T xy (drop duration channel) |
 
-β is checked **every sim step** while executing a cached chunk; diffusion replans at most every `n_action_steps` steps unless β fires earlier.
+β is checked **every sim step** while executing a cached chunk (including right after replan). Diffusion replans when the native chunk is exhausted; π_high resamples ω only when β fires.
 
 ## `reset()`
 

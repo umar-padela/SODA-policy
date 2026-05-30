@@ -8,7 +8,7 @@
 | `train_soda.sh` | Train SODA: `task=pusht\|square` `discovery=supervised\|unsupervised` |
 | `eval_soda.sh` | Evaluation driver |
 | `sweep_train_low.py` | A4 π_low LR sweep (3 trials × short epochs; ranks `val_loss_diffusion`) |
-| `sweep_train_high.py` | B4 π_high sweep (default LR; `--full-grid` for 16-trial factorial) |
+| `sweep_train_high.py` | B4 π_high LR sweep (5 trials; architecture fixed at yaml) |
 | `rollout_segment.py` | A3b expert-anchored π_low rollout from zarr segment start (side-by-side MP4) |
 | `modal/modal_rollout_low_policy.py` | Same as above on Modal GPU + Volume (no local checkpoint download) |
 
@@ -51,10 +51,13 @@ python scripts/sweep_train_low.py --num-epochs 14 --dry-run --run-readme "A4 pi_
 python scripts/sweep_train_low.py --num-epochs 14 --run-readme "A4 pi_low LR sweep"
 
 python scripts/sweep_train_high.py \
-  --low-checkpoint experiments/train_low/soda_supervised/best.ckpt \
+  --low-checkpoint experiments/pusht/train_low/soda_supervised/best.ckpt \
   --num-epochs 14 --run-readme "B4 pi_high LR sweep"
 ```
 
-Add `--modal` to launch trials on Modal. Use `--modal --no-detach` to wait for jobs,
-sync `metrics.json` from the Volume, and print a local ranking table. Detached Modal
-runs persist under `/experiments/sweep_low/` or `/experiments/sweep_high/` on the Volume.
+Add `--modal` to launch trials on Modal in **parallel** (default: detached; laptop can disconnect).
+Use `--modal --no-detach` to run trials **one at a time**, wait for each, sync `metrics.json`
+from the Volume, and print a local ranking table.
+
+Outputs persist under `/experiments/pusht/sweep_low/` or `/experiments/pusht/sweep_high/` on
+the Volume (7 parallel LR trials ≈ 7 GPUs concurrently — watch Modal quota).

@@ -42,11 +42,21 @@ app = modal.App("soda-policy")
 # Repo root inside the container (set by add_local_dir below).
 REPO_ROOT = "/root/soda-policy"
 ZARR_PATH = f"{REPO_ROOT}/data/raw/pusht/pusht.zarr"
-EXPERIMENTS_MOUNT = "/experiments"
-DP_FROZEN_VOLUME_DIR = f"{EXPERIMENTS_MOUNT}/dp_baselines/pusht_image_cnn_train0"
-# Back-compat alias (volume path unchanged on Modal).
+from soda.experiments.paths import (
+    frozen_dp_pusht_checkpoint,
+    hydra_run_dir,
+    infer_task_slug,
+    segment_rollout_dir,
+    train_dp_dir,
+    train_high_dir,
+    train_low_dir,
+    VOLUME_MOUNT as EXPERIMENTS_MOUNT,
+)
+
+# Back-compat aliases (prefer paths module).
+DP_FROZEN_VOLUME_DIR = str(frozen_dp_pusht_checkpoint(in_volume=True))
 DP_BASELINE_VOLUME_DIR = DP_FROZEN_VOLUME_DIR
-FROZEN_DP_PUSHT_CHECKPOINT = f"{DP_FROZEN_VOLUME_DIR}/latest.ckpt"
+FROZEN_DP_PUSHT_CHECKPOINT = str(frozen_dp_pusht_checkpoint(in_volume=True))
 
 # ---------------------------------------------------------------------------
 # Image = recipe for the remote machine (OS packages + Python deps + your code)
@@ -142,6 +152,10 @@ image = (
         'pip install --no-cache-dir --no-deps "robosuite @ https://github.com/cheng-chi/robosuite/archive/277ab9588ad7a4f4b55cf75508b44aa67ec171f0.tar.gz"',
         "pip install --no-cache-dir 'robomimic==0.2.0'",
     )
+    .run_commands(
+        # Pre-bake ResNet18 ImageNet weights so containers don't download on every cold start.
+        "python -c \"import torchvision; torchvision.models.resnet18(pretrained=True)\"",
+    )
     .add_local_dir(
         ".",
         remote_path=REPO_ROOT,
@@ -168,7 +182,11 @@ volume = modal.Volume.from_name("soda-experiments", create_if_missing=True)
 #   set MODAL_GPU_EVAL=L4 && set MODAL_GPU_TRAIN=A100-40GB  (Windows)
 #   MODAL_GPU_EVAL=L4 MODAL_GPU_TRAIN=A100-40GB modal run ...
 GPU_EVAL = os.environ.get("MODAL_GPU_EVAL", "A10G")
-GPU_TRAIN = os.environ.get("MODAL_GPU_TRAIN", "L40S")
+GPU_TRAIN = os.environ.get("MODAL_GPU_TRAIN", "A100-40GB")
+# Number of GPUs for training — set MODAL_NUM_GPUS=2 to request 2× A100-40GB + torchrun DDP.
+NUM_GPUS_TRAIN = int(os.environ.get("MODAL_NUM_GPUS", "1"))
+# Modal GPU spec: "A100-40GB" for 1 GPU, "A100-40GB:2" for 2 GPUs, etc.
+_GPU_TRAIN_SPEC = f"{GPU_TRAIN}:{NUM_GPUS_TRAIN}" if NUM_GPUS_TRAIN > 1 else GPU_TRAIN
 
 # W&B optional — attach only when logging. Create once:
 #   modal secret create wandb WANDB_API_KEY=<key>
@@ -192,17 +210,17 @@ def _run(
     subprocess.run(cmd, cwd=cwd or REPO_ROOT, check=True, env=env)
 
 
-def _volume_train_low_dir(config_name: str) -> str:
+def _volume_train_low_dir(task: str, config_name: str) -> str:
     """Persistent checkpoint dir on Modal Volume (not ephemeral container FS)."""
-    return f"{EXPERIMENTS_MOUNT}/train_low/{config_name}"
+    return str(train_low_dir(task, config_name, in_volume=True))
 
 
-def _volume_train_high_dir(config_name: str) -> str:
-    return f"{EXPERIMENTS_MOUNT}/train_high/{config_name}"
+def _volume_train_high_dir(task: str, config_name: str) -> str:
+    return str(train_high_dir(task, config_name, in_volume=True))
 
 
-def _volume_train_dp_dir(config_name: str) -> str:
-    return f"{EXPERIMENTS_MOUNT}/train_dp/{config_name}"
+def _volume_train_dp_dir(task: str, config_name: str) -> str:
+    return str(train_dp_dir(task, config_name, in_volume=True))
 
 
 def _parse_hydra_overrides(hydra_overrides: str | list[str] | None) -> list[str]:
@@ -238,15 +256,30 @@ def _build_train_cmd(
     hydra_subdir: str,
     default_overrides: dict[str, str],
     hydra_overrides: list[str] | None = None,
+    use_torchrun: bool = False,
 ) -> list[str]:
-    hydra_dir = Path(EXPERIMENTS_MOUNT) / hydra_subdir / f"{task}_{config_name}"
+    hydra_dir = Path(hydra_run_dir(task, hydra_subdir, config_name, in_volume=True))
     hydra_dir.mkdir(parents=True, exist_ok=True)
     overrides = _merge_hydra_overrides(default_overrides, hydra_overrides)
     # Hydra resolves --config-path relative to the @hydra.main script (soda/training/),
     # not cwd — use an absolute repo path so Modal and local subprocess calls agree.
     config_dir = Path(REPO_ROOT) / "configs" / task
-    cmd = [
-        "python",
+    # Use torchrun for multi-GPU DDP training; fall back to plain python for single GPU.
+    # Detect GPU count at call time (inside container) rather than at import time (on laptop),
+    # because MODAL_NUM_GPUS is not propagated into the container environment.
+    if use_torchrun:
+        try:
+            import torch as _torch
+            n_gpus = _torch.cuda.device_count() if _torch.cuda.is_available() else 1
+        except Exception:
+            n_gpus = NUM_GPUS_TRAIN  # fallback to locally-read value
+        if n_gpus > 1:
+            launcher = ["torchrun", f"--nproc_per_node={n_gpus}"]
+        else:
+            launcher = ["python"]
+    else:
+        launcher = ["python"]
+    cmd = launcher + [
         script,
         "--config-path",
         str(config_dir),
@@ -268,9 +301,18 @@ def spawn_modal_function(
     """
     Start a Modal function with ``.spawn()`` (preferred over ``.remote()``).
 
-    ``spawn`` returns a ``FunctionCall`` handle immediately, so detached / long
-    jobs are not canceled when the local ``modal run`` process disconnects.
-    When ``wait=True``, blocks on ``FunctionCall.get()`` for the result.
+    ``.spawn()`` creates an independent FunctionCall on Modal's servers.  The job
+    survives even if the local process disconnects — but ONLY when the local
+    entrypoint was invoked with ``modal run --detach`` (the CLI flag BEFORE the
+    script path).  Without that flag, Modal stops the ephemeral app when the
+    entrypoint exits and cancels any spawned jobs.
+
+    ``wait=True``  → ``.spawn().get()``: blocks until the remote function returns
+                      (live logs stream to your terminal).  Close the terminal
+                      any time if you used ``--detach``; the job keeps running.
+    ``wait=False`` → ``.spawn()`` only: entrypoint returns immediately.  Use this
+                      when the entrypoint itself is not the top-level modal run
+                      (e.g. the sequential sweep entrypoint).
     """
     call = modal_function.spawn(**kwargs)
     print(f"Spawned {label} (object_id={call.object_id})")
@@ -444,11 +486,13 @@ def resolve_volume_path(path: str | Path, *, mount: str = EXPERIMENTS_MOUNT) -> 
 
 
 def default_low_checkpoint_for_config(config_path: str) -> Path:
-    """``/experiments/train_low/{config_stem}/best.ckpt`` from eval yaml path."""
+    """``/experiments/{task}/train_low/{config_stem}/best.ckpt`` from eval yaml path."""
     from soda.eval.eval_yaml import resolve_eval_config_path
 
-    stem = resolve_eval_config_path(config_path).stem
-    return Path(EXPERIMENTS_MOUNT) / "train_low" / stem / "best.ckpt"
+    resolved = resolve_eval_config_path(config_path)
+    task = infer_task_slug(config_path=resolved)
+    stem = resolved.stem
+    return Path(train_low_dir(task, stem, in_volume=True)) / "best.ckpt"
 
 
 @app.function(
@@ -523,6 +567,7 @@ def rollout_low_policy(
     )
 
     resolved_config = resolve_eval_config_path(config_path)
+    task = infer_task_slug(config_path=resolved_config)
     ckpt_path = (
         resolve_volume_path(checkpoint)
         if checkpoint is not None
@@ -537,7 +582,7 @@ def rollout_low_policy(
     out_dir = (
         resolve_volume_path(output_dir)
         if output_dir is not None
-        else Path(EXPERIMENTS_MOUNT) / "segment_rollout"
+        else Path(segment_rollout_dir(task, in_volume=True))
     )
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -627,7 +672,321 @@ def rollout_low_policy(
 
 @app.function(
     image=image,
-    gpu=GPU_TRAIN,
+    gpu=GPU_EVAL,
+    timeout=7200,
+    volumes={EXPERIMENTS_MOUNT: volume},
+)
+def rollout_dp_policy(
+    *,
+    checkpoint: str | None = None,
+    zarr_path: str | None = None,
+    label_key: str = "option_id_supervised",
+    n_action_steps: int = 8,
+    max_steps: int | None = None,
+    output_dir: str | None = None,
+    no_video: bool = False,
+    per_skill: int = 2,
+    invoke_command: str | None = None,
+) -> dict:
+    """
+    Expert-anchored vanilla DP segment rollout on Modal.
+
+    Resets sim to zarr segment start states and rolls out the Columbia frozen DP
+    (no option conditioning, no β head). Use ``per_skill`` to control how many
+    representative segments per skill are rolled out (default 2 → 6 total).
+
+    Default checkpoint: /experiments/dp_baselines/pusht_image_cnn_train0/latest.ckpt
+    Outputs land under /experiments/pusht/segment_rollout/dp_baseline/ on the Volume.
+    """
+    from soda.eval.segment_rollout import run_representative_segment_rollouts_dp
+    from soda.eval.segment_zarr import REPRESENTATIVE_MIN_SEGMENT_LENGTH
+
+    ckpt_path = (
+        resolve_volume_path(checkpoint)
+        if checkpoint is not None
+        else Path(FROZEN_DP_PUSHT_CHECKPOINT)
+    )
+    if not ckpt_path.is_file():
+        raise FileNotFoundError(
+            f"DP checkpoint not found on Volume: {ckpt_path}\n"
+            "Download with: modal run modal/modal_download_dp.py"
+        )
+
+    out_dir = (
+        resolve_volume_path(output_dir)
+        if output_dir is not None
+        else Path(segment_rollout_dir("pusht", in_volume=True)) / "dp_baseline"
+    )
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    if invoke_command:
+        (out_dir / "invoke_command.txt").write_text(invoke_command + "\n", encoding="utf-8")
+
+    results = run_representative_segment_rollouts_dp(
+        dp_checkpoint=ckpt_path,
+        zarr_path=Path(zarr_path or ZARR_PATH),
+        per_skill=per_skill,
+        min_segment_length=REPRESENTATIVE_MIN_SEGMENT_LENGTH,
+        label_key=label_key,
+        device="cuda:0",
+        n_action_steps=n_action_steps,
+        max_steps=max_steps,
+        output_dir=out_dir,
+        record_video=not no_video,
+    )
+    volume.commit()
+
+    rollouts = []
+    for r in results:
+        rollouts.append(
+            {
+                "segment_index": r.segment_index,
+                "anchor_frame": r.anchor_frame,
+                "fixed_option_id": r.fixed_option_id,
+                "n_policy_steps": r.n_policy_steps,
+                "metrics": r.metrics,
+                "video_path": str(r.video_path) if r.video_path else None,
+            }
+        )
+        print(
+            "rollout_dp_policy OK:",
+            {
+                "segment_index": r.segment_index,
+                "skill": r.metrics.get("skill"),
+                "max_overlap": r.metrics.get("max_overlap_full"),
+                "video_path": str(r.video_path) if r.video_path else None,
+            },
+        )
+
+    return {
+        "checkpoint": str(ckpt_path),
+        "output_dir": str(out_dir),
+        "per_skill": per_skill,
+        "n_rollouts": len(rollouts),
+        "rollouts": rollouts,
+    }
+
+
+def default_high_checkpoint_for_config(config_path: str) -> Path:
+    """``/experiments/{task}/train_high/{config_stem}/best.ckpt`` from eval yaml path."""
+    from soda.eval.eval_yaml import resolve_eval_config_path
+
+    resolved = resolve_eval_config_path(config_path)
+    task = infer_task_slug(config_path=resolved)
+    stem = resolved.stem
+    return Path(train_high_dir(task, stem, in_volume=True)) / "best.ckpt"
+
+
+def hierarchical_rollout_dir(task: str = "pusht") -> str:
+    """Volume path for hierarchical rollout outputs."""
+    return str(Path(EXPERIMENTS_MOUNT) / task / "hierarchical_rollout")
+
+
+@app.function(
+    image=image,
+    gpu=GPU_EVAL,
+    timeout=7200,
+    volumes={EXPERIMENTS_MOUNT: volume},
+)
+def rollout_hierarchical(
+    config_path: str = "configs/pusht/soda_supervised.yaml",
+    *,
+    high_checkpoint: str | None = None,
+    low_checkpoint: str | None = None,
+    n_episodes: int = 5,
+    test_start_seed: int = 100000,
+    n_action_steps: int = 8,
+    beta_transition: float | None = None,
+    open_loop: bool = False,
+    duration_termination: bool = False,
+    max_steps: int = 300,
+    output_dir: str | None = None,
+    no_video: bool = False,
+    video_failure_threshold: float | None = 20.0,
+    invoke_command: str | None = None,
+) -> dict:
+    """
+    Full-episode hierarchical rollout (π_high + π_low + β) on Modal.
+
+    ``video_failure_threshold``: save video only for episodes where max_overlap_full
+    is below this percentage (default 20.0). Set to None to save all videos when
+    no_video=False, or ignored entirely when no_video=True.
+
+    Produces annotated MP4s (frame idx, skill border, β, duration, cursor, REPLAN)
+    and per-episode JSON summaries under ``/experiments/{task}/hierarchical_rollout/``.
+
+    ``open_loop=True``: π_high resamples ω after every full native chunk; β disabled.
+    Default checkpoints: best.ckpt from train_high / train_low for the config.
+    """
+    from soda.eval.eval_yaml import resolve_eval_config_path
+    from soda.eval.hierarchical_rollout import run_hierarchical_rollouts
+
+    resolved_config = resolve_eval_config_path(config_path)
+    task = infer_task_slug(config_path=resolved_config)
+
+    high_ckpt = (
+        resolve_volume_path(high_checkpoint)
+        if high_checkpoint is not None
+        else default_high_checkpoint_for_config(config_path)
+    )
+    low_ckpt = (
+        resolve_volume_path(low_checkpoint)
+        if low_checkpoint is not None
+        else default_low_checkpoint_for_config(config_path)
+    )
+
+    for label, path in (("π_high", high_ckpt), ("π_low", low_ckpt)):
+        if not path.is_file():
+            raise FileNotFoundError(
+                f"{label} checkpoint not found on Volume: {path}\n"
+                "Train first or pass --high-checkpoint / --low-checkpoint explicitly."
+            )
+
+    out_dir = (
+        resolve_volume_path(output_dir)
+        if output_dir is not None
+        else Path(hierarchical_rollout_dir(task))
+    )
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    if invoke_command:
+        (out_dir / "invoke_command.txt").write_text(invoke_command + "\n", encoding="utf-8")
+
+    print(
+        f"rollout_hierarchical: n_episodes={n_episodes} n_action_steps={n_action_steps} "
+        f"beta_transition={beta_transition} max_steps={max_steps}"
+    )
+    print(f"  π_high: {high_ckpt}")
+    print(f"  π_low:  {low_ckpt}")
+
+    results = run_hierarchical_rollouts(
+        config_path=resolved_config,
+        high_checkpoint=high_ckpt,
+        low_checkpoint=low_ckpt,
+        device="cuda:0",
+        n_episodes=n_episodes,
+        test_start_seed=test_start_seed,
+        n_action_steps=n_action_steps,
+        beta_transition=beta_transition,
+        open_loop=open_loop,
+        duration_termination=duration_termination,
+        max_steps=max_steps,
+        output_dir=out_dir,
+        record_video=not no_video,
+        video_overlap_threshold=None if no_video else video_failure_threshold,
+    )
+
+    volume.commit()
+
+    episodes = []
+    for r in results:
+        episodes.append(
+            {
+                "episode_idx": r.episode_idx,
+                "seed": r.seed,
+                "n_steps": r.n_steps,
+                "n_replans": r.n_replans,
+                "metrics": r.metrics,
+                "option_sequence": r.option_sequence[:20],  # truncate for JSON readability
+                "video_path": str(r.video_path) if r.video_path else None,
+            }
+        )
+        print(
+            f"rollout_hierarchical ep={r.episode_idx}: "
+            f"steps={r.n_steps} replans={r.n_replans} "
+            f"max_overlap={r.metrics.get('max_overlap_full', 0):.1f}% "
+            f"video={r.video_path}"
+        )
+
+    mean_score = float(
+        sum(e["metrics"].get("max_overlap_full", 0.0) for e in episodes) / len(episodes)
+    ) if episodes else 0.0
+
+    payload = {
+        "config_path": str(resolved_config),
+        "high_checkpoint": str(high_ckpt),
+        "low_checkpoint": str(low_ckpt),
+        "output_dir": str(out_dir),
+        "n_episodes": len(episodes),
+        "mean_max_overlap": mean_score,
+        "episodes": episodes,
+    }
+    print(f"rollout_hierarchical OK: n={len(episodes)} mean_max_overlap={mean_score:.1f}%")
+    return payload
+
+
+@app.function(
+    image=image,
+    gpu=_GPU_TRAIN_SPEC,
+    timeout=86400,
+    volumes={EXPERIMENTS_MOUNT: volume},
+    secrets=[_wandb_secret],
+)
+def run_sweep_train_low_sequential(
+    trials: list[dict],
+) -> None:
+    """
+    Run π_low sweep trials sequentially on a single GPU container.
+
+    Each trial dict: {name, task, config_name, hydra_overrides (list[str]), run_readme}.
+    All trials share one GPU — no concurrent quota issues; laptop can disconnect.
+    """
+    n = len(trials)
+    for i, trial in enumerate(trials, 1):
+        name = trial["name"]
+        print(f"\n{'=' * 60}\n=== Sweep trial {i}/{n}: {name} ===\n{'=' * 60}")
+        overrides = _parse_hydra_overrides(trial.get("hydra_overrides") or [])
+        cmd = _build_train_cmd(
+            "soda/training/train_low.py",
+            task=trial["task"],
+            config_name=trial["config_name"],
+            hydra_subdir="sweep_low",
+            default_overrides={},
+            hydra_overrides=overrides,
+        )
+        _run(cmd, run_readme=trial.get("run_readme", ""))
+        volume.commit()
+        print(f"Trial {name} done.")
+    print(f"\nAll {n} sweep trials complete.")
+
+
+@app.function(
+    image=image,
+    gpu=_GPU_TRAIN_SPEC,
+    timeout=86400,
+    volumes={EXPERIMENTS_MOUNT: volume},
+    secrets=[_wandb_secret],
+)
+def run_sweep_train_high_sequential(
+    trials: list[dict],
+) -> None:
+    """
+    Run π_high sweep trials sequentially on a single GPU container.
+
+    Each trial dict: {name, task, config_name, hydra_overrides (list[str]), run_readme}.
+    """
+    n = len(trials)
+    for i, trial in enumerate(trials, 1):
+        name = trial["name"]
+        print(f"\n{'=' * 60}\n=== Sweep trial {i}/{n}: {name} ===\n{'=' * 60}")
+        overrides = _parse_hydra_overrides(trial.get("hydra_overrides") or [])
+        cmd = _build_train_cmd(
+            "soda/training/train_high.py",
+            task=trial["task"],
+            config_name=trial["config_name"],
+            hydra_subdir="sweep_high",
+            default_overrides={},
+            hydra_overrides=overrides,
+        )
+        _run(cmd, run_readme=trial.get("run_readme", ""))
+        volume.commit()
+        print(f"Trial {name} done.")
+    print(f"\nAll {n} sweep trials complete.")
+
+
+@app.function(
+    image=image,
+    gpu=_GPU_TRAIN_SPEC,
     timeout=86400,
     volumes={EXPERIMENTS_MOUNT: volume},
     secrets=[_wandb_secret],
@@ -653,8 +1012,8 @@ def train_dp(
         config_name=config_name,
         hydra_subdir="train_dp",
         default_overrides={
-            "train_dp.output_dir": _volume_train_dp_dir(config_name),
-            "checkpoint.volume_path": f"{_volume_train_dp_dir(config_name)}/latest.ckpt",
+            "train_dp.output_dir": _volume_train_dp_dir(task, config_name),
+            "checkpoint.volume_path": f"{_volume_train_dp_dir(task, config_name)}/latest.ckpt",
         },
         hydra_overrides=overrides,
     )
@@ -664,8 +1023,8 @@ def train_dp(
 
 @app.function(
     image=image,
-    gpu=GPU_TRAIN,
-    timeout=14400,
+    gpu=_GPU_TRAIN_SPEC,
+    timeout=86400,
     volumes={EXPERIMENTS_MOUNT: volume},
     secrets=[_wandb_secret],
 )
@@ -682,6 +1041,7 @@ def train_low(
 
     Checkpoints are written to ``/experiments/train_low/{config_name}/`` on the Volume
     (override with ``train_low.output_dir=...`` in ``hydra_overrides``).
+    Set MODAL_NUM_GPUS=N before ``modal run`` to use N-GPU DDP (torchrun).
     """
     overrides = _parse_hydra_overrides(hydra_overrides)
     cmd = _build_train_cmd(
@@ -690,9 +1050,10 @@ def train_low(
         config_name=config_name,
         hydra_subdir="train_low",
         default_overrides={
-            "train_low.output_dir": _volume_train_low_dir(config_name),
+            "train_low.output_dir": _volume_train_low_dir(task, config_name),
         },
         hydra_overrides=overrides,
+        use_torchrun=True,
     )
     _run(cmd, run_readme=run_readme, invoke_command=invoke_command)
     volume.commit()
@@ -700,8 +1061,8 @@ def train_low(
 
 @app.function(
     image=image,
-    gpu=GPU_TRAIN,
-    timeout=14400,
+    gpu=_GPU_TRAIN_SPEC,
+    timeout=28800,
     volumes={EXPERIMENTS_MOUNT: volume},
     secrets=[_wandb_secret],
 )
@@ -733,9 +1094,212 @@ def train_high(
         config_name=config_name,
         hydra_subdir="train_high",
         default_overrides={
-            "train_high.output_dir": _volume_train_high_dir(config_name),
+            "train_high.output_dir": _volume_train_high_dir(task, config_name),
         },
         hydra_overrides=overrides,
+        use_torchrun=True,
     )
     _run(cmd, run_readme=run_readme, invoke_command=invoke_command)
     volume.commit()
+
+
+@app.function(
+    image=image,
+    gpu=None,
+    timeout=600,
+    volumes={EXPERIMENTS_MOUNT: volume},
+)
+def analyze_high(checkpoint: str, split: str = "val") -> dict:
+    """Confusion matrix + per-class accuracy for a trained π_high checkpoint."""
+    import dill
+    import numpy as np
+    import torch
+    from omegaconf import OmegaConf
+    from torch.utils.data import DataLoader
+
+    from soda.eval.policy_loaders import load_high_policy_from_checkpoint
+    from soda.training.train_high import build_datasets
+
+    print(f"Loading π_high from {checkpoint} ...")
+    policy = load_high_policy_from_checkpoint(checkpoint, device="cpu")
+    policy.eval()
+
+    payload = torch.load(checkpoint, pickle_module=dill, map_location="cpu")
+    saved_cfg = payload.get("cfg")
+    if saved_cfg is None:
+        raise ValueError("Checkpoint has no saved cfg — cannot rebuild dataset.")
+    cfg = OmegaConf.create(saved_cfg) if isinstance(saved_cfg, dict) else saved_cfg
+    OmegaConf.update(cfg, "task.dataset.zarr_path", ZARR_PATH, merge=True)
+
+    train_ds, val_ds = build_datasets(cfg)
+    ds = val_ds if split == "val" else train_ds
+    print(f"Dataset split={split}: {len(ds)} samples")
+
+    loader = DataLoader(ds, batch_size=64, shuffle=False, num_workers=0)
+    num_options = policy.cfg.num_options
+    confusion = np.zeros((num_options, num_options), dtype=int)
+
+    with torch.no_grad():
+        for batch in loader:
+            labels = batch["option_id"].reshape(-1).long()
+            feat = policy.encode_obs(batch["obs"])
+            prev_opt_id = batch.get("prev_option_id", None)
+            preds = policy.sample_option(feat, prev_option_id=prev_opt_id)
+            for true, pred in zip(labels.numpy(), preds.cpu().numpy()):
+                confusion[true, pred] += 1
+
+    print(f"\nConfusion matrix  ({split})  — rows=true label, cols=predicted")
+    print(f"{'':>10}", end="")
+    for j in range(num_options):
+        print(f"  pred_{j:>2}", end="")
+    print("   | recall  (n)")
+    for i in range(num_options):
+        print(f"  true_{i:>3} ", end="")
+        for j in range(num_options):
+            marker = "*" if i == j else " "
+            print(f" {confusion[i, j]:>5}{marker}", end="")
+        n = int(confusion[i].sum())
+        recall = confusion[i, i] / n if n > 0 else 0.0
+        print(f"   | {recall:.1%}  ({n})")
+
+    print("\nPer-class precision:")
+    for j in range(num_options):
+        n_pred = int(confusion[:, j].sum())
+        prec = confusion[j, j] / n_pred if n_pred > 0 else 0.0
+        print(f"  option_{j}: {prec:.1%}  ({confusion[j, j]}/{n_pred} predicted as {j})")
+
+    total_correct = int(np.diag(confusion).sum())
+    total = int(confusion.sum())
+    overall = total_correct / total if total > 0 else 0.0
+    print(f"\nOverall {split} accuracy: {overall:.1%}  ({total_correct}/{total})")
+
+    errors = [
+        (confusion[i, j], i, j)
+        for i in range(num_options)
+        for j in range(num_options)
+        if i != j and confusion[i, j] > 0
+    ]
+    print("\nTop misclassifications (true → predicted, count):")
+    for count, true, pred in sorted(errors, reverse=True):
+        print(f"  option_{true} → option_{pred}: {count}")
+
+    return {"confusion": confusion.tolist(), "overall_acc": overall, "split": split}
+
+
+@app.function(
+    image=image,
+    gpu=None,
+    timeout=600,
+    volumes={EXPERIMENTS_MOUNT: volume},
+)
+def analyze_high_images(
+    checkpoint: str,
+    split: str = "val",
+    max_images: int = 300,
+    output_dir: str | None = None,
+    scale: int = 3,
+) -> dict:
+    """
+    Save one annotated PNG per val sample; organise into correct/ and wrong/ subdirs.
+
+    Each image: 60px header (true/pred skill names, CORRECT/WRONG status) stacked above
+    the upscaled (96×scale px) frame with the predicted option border burned in.
+
+    ``output_dir`` is a path on the Modal Volume (default: ``{ckpt_dir}/{split}_frames/``).
+    Returns ``{"output_dir": str, "n_saved": int, "n_wrong": int}``.
+    """
+    import cv2
+    import dill
+    import numpy as np
+    import torch
+    from omegaconf import OmegaConf
+
+    from soda.eval.policy_loaders import load_high_policy_from_checkpoint
+    from soda.option_discovery.supervised.pusht.frame_overlays import (
+        SKILL_COLORS_BGR,
+        burn_option_overlay,
+    )
+    from soda.option_discovery.supervised.pusht.heuristics import SKILL_NAMES
+    from soda.training.train_high import build_datasets
+
+    FRAME_SZ = 96
+    HEADER_H = 60
+
+    print(f"Loading π_high from {checkpoint} ...")
+    policy = load_high_policy_from_checkpoint(checkpoint, device="cpu")
+    policy.eval()
+
+    payload = torch.load(checkpoint, pickle_module=dill, map_location="cpu")
+    saved_cfg = payload.get("cfg")
+    if saved_cfg is None:
+        raise ValueError("Checkpoint has no saved cfg — cannot rebuild dataset.")
+    cfg = OmegaConf.create(saved_cfg) if isinstance(saved_cfg, dict) else saved_cfg
+    OmegaConf.update(cfg, "task.dataset.zarr_path", ZARR_PATH, merge=True)
+
+    train_ds, val_ds = build_datasets(cfg)
+    ds = val_ds if split == "val" else train_ds
+    print(f"Dataset split={split}: {len(ds)} samples")
+
+    ckpt_dir = str(Path(checkpoint).parent)
+    out_dir = Path(output_dir or f"{ckpt_dir}/{split}_frames")
+    (out_dir / "correct").mkdir(parents=True, exist_ok=True)
+    (out_dir / "wrong").mkdir(parents=True, exist_ok=True)
+
+    n_wrong = 0
+    counters: dict[str, int] = {}
+    W = FRAME_SZ * scale
+
+    with torch.no_grad():
+        for idx in range(min(len(ds), max_images)):
+            sample = ds[idx]
+            obs = {k: v.unsqueeze(0) for k, v in sample["obs"].items()}
+            true_id = int(sample["option_id"].item())
+            prev_opt_tensor = sample.get("prev_option_id", None)
+            if prev_opt_tensor is not None:
+                prev_opt_tensor = prev_opt_tensor.reshape(1)
+            feat = policy.encode_obs(obs)
+            pred_id = int(policy.sample_option(feat, prev_option_id=prev_opt_tensor).item())
+            correct = true_id == pred_id
+            if not correct:
+                n_wrong += 1
+
+            # float32 CHW [0,1] (last obs step) → uint8 HWC BGR
+            img_chw = sample["obs"]["image"][-1].numpy()  # (3, 96, 96)
+            img_bgr = cv2.cvtColor(
+                (img_chw.transpose(1, 2, 0) * 255).astype(np.uint8),
+                cv2.COLOR_RGB2BGR,
+            )
+
+            # Burn predicted option border + skill name on 96×96, then upscale
+            frame = burn_option_overlay(img_bgr, pred_id)
+            frame_up = cv2.resize(frame, (W, W), interpolation=cv2.INTER_NEAREST)
+
+            # Header bar: skill-color bg (red if wrong), true+pred text
+            true_name = SKILL_NAMES.get(true_id, str(true_id))
+            pred_name = SKILL_NAMES.get(pred_id, str(pred_id))
+            bg_color = (0, 0, 180) if not correct else SKILL_COLORS_BGR.get(pred_id, (100, 100, 100))
+            header = np.full((HEADER_H, W, 3), bg_color, dtype=np.uint8)
+            status_text = "CORRECT" if correct else "WRONG"
+            status_color = (0, 200, 0) if correct else (0, 0, 255)
+            cv2.putText(header, f"True:  {true_name}", (6, 16), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
+            cv2.putText(header, f"Pred:  {pred_name}", (6, 34), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 1, cv2.LINE_AA)
+            cv2.putText(header, status_text, (6, 54), cv2.FONT_HERSHEY_SIMPLEX, 0.55, status_color, 2, cv2.LINE_AA)
+
+            img_out = np.vstack([header, frame_up])
+
+            # Filename: true skill name + counter, so files group naturally by skill
+            key = f"{'correct' if correct else 'wrong'}_{true_name}"
+            counters[key] = counters.get(key, 0) + 1
+            subdir = "correct" if correct else "wrong"
+            if correct:
+                fname = f"true_{true_name}_{counters[key]:04d}.png"
+            else:
+                fname = f"true_{true_name}_pred_{pred_name}_{counters[key]:04d}.png"
+            cv2.imwrite(str(out_dir / subdir / fname), img_out)
+
+    volume.commit()
+    n_saved = min(len(ds), max_images)
+    print(f"Saved {n_saved} images → {out_dir}/  (wrong={n_wrong}/{n_saved})")
+    print(f"  correct/ — {n_saved - n_wrong} images")
+    print(f"  wrong/   — {n_wrong} images")
+    return {"output_dir": str(out_dir), "n_saved": n_saved, "n_wrong": n_wrong}

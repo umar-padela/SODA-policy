@@ -1,8 +1,13 @@
 """
 Stratified mini-batches for π_low termination (β) training.
 
-Each train batch includes a fixed count of β=1 (segment-end anchor) and β=0
-(random anchor) samples so no batch is all negatives.
+Two samplers are provided:
+
+- :class:`OptionBetaStratifiedBatchSampler` — legacy; works with the random-anchor
+  (1 entry per segment) dataset mode and encoded segment indices.
+- :class:`AllAnchorsBetaStratifiedBatchSampler` — for ``all_anchors=True`` datasets;
+  takes explicit pos/neg flat index lists and guarantees the natural-rate β=1 fraction
+  per batch (e.g. 4/64 for Push-T at 5.6% pos rate).
 
 Default positive fraction: ``1 / (gamma + 1)`` where ``gamma`` is BCE ``pos_weight``.
 That balances loss mass: ``f * gamma ≈ (1 - f)`` for per-sample BCE with pos_weight.
@@ -49,6 +54,82 @@ def positives_per_batch(batch_size: int, pos_fraction: float) -> int:
     n_pos = int(round(batch_size * frac))
     n_pos = max(1, min(batch_size - 1, n_pos))
     return n_pos
+
+
+class AllAnchorsBetaStratifiedBatchSampler(Sampler[list[int]]):
+    """
+    Stratified batch sampler for ``all_anchors=True`` datasets.
+
+    Takes explicit ``pos_indices`` / ``neg_indices`` lists (flat dataset indices
+    where beta_label == 1 / 0) and guarantees ``n_pos = max(1, round(batch_size ×
+    pos_rate))`` β=1 examples per batch, where ``pos_rate = len(pos) / total``.
+
+    For Push-T with 5.6% pos rate and ``batch_size=64``, this gives 4 β=1 per batch
+    regardless of how the epoch shuffle falls.  Positive pool wraps with replacement
+    when ``n_batches * n_pos_per_batch > len(pos_indices)``; negative pool likewise.
+    """
+
+    def __init__(
+        self,
+        pos_indices: list[int],
+        neg_indices: list[int],
+        batch_size: int,
+        *,
+        seed: int = 0,
+        drop_last: bool = True,
+    ) -> None:
+        if not pos_indices:
+            raise ValueError("pos_indices must be non-empty")
+        if not neg_indices:
+            raise ValueError("neg_indices must be non-empty")
+        self.pos_indices = list(pos_indices)
+        self.neg_indices = list(neg_indices)
+        self.batch_size = int(batch_size)
+        self.seed = int(seed)
+        self.drop_last = bool(drop_last)
+        self.epoch = 0
+
+        total = len(self.pos_indices) + len(self.neg_indices)
+        pos_rate = len(self.pos_indices) / total
+        self.pos_per_batch = positives_per_batch(batch_size, pos_rate)
+        self.neg_per_batch = self.batch_size - self.pos_per_batch
+
+    def set_epoch(self, epoch: int) -> None:
+        self.epoch = int(epoch)
+
+    def __len__(self) -> int:
+        total = len(self.pos_indices) + len(self.neg_indices)
+        if self.drop_last:
+            return total // self.batch_size
+        return (total + self.batch_size - 1) // self.batch_size
+
+    def __iter__(self) -> Iterator[list[int]]:
+        rng = np.random.default_rng(self.seed + self.epoch)
+        n_batches = len(self)
+        n_pos_needed = n_batches * self.pos_per_batch
+        n_neg_needed = n_batches * self.neg_per_batch
+
+        pos_arr = rng.permutation(np.asarray(self.pos_indices))
+        neg_arr = rng.permutation(np.asarray(self.neg_indices))
+
+        if n_pos_needed > len(pos_arr):
+            reps = math.ceil(n_pos_needed / len(pos_arr))
+            pos_arr = np.concatenate([pos_arr] * reps)
+        pos_pool = pos_arr[:n_pos_needed]
+
+        if n_neg_needed > len(neg_arr):
+            reps = math.ceil(n_neg_needed / len(neg_arr))
+            neg_arr = np.concatenate([neg_arr] * reps)
+        neg_pool = neg_arr[:n_neg_needed]
+
+        for batch_idx in range(n_batches):
+            ps = batch_idx * self.pos_per_batch
+            ns = batch_idx * self.neg_per_batch
+            pos_pick = pos_pool[ps : ps + self.pos_per_batch]
+            neg_pick = neg_pool[ns : ns + self.neg_per_batch]
+            batch = [int(x) for x in pos_pick] + [int(x) for x in neg_pick]
+            rng.shuffle(batch)
+            yield batch
 
 
 class OptionBetaStratifiedBatchSampler(Sampler[list[int]]):

@@ -15,9 +15,22 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Literal
 
+from soda.experiments.paths import (
+    MODAL_VOLUME_NAME,
+    local_mirror_for_experiments_path as _local_mirror_for_experiments_path,
+    sweep_high_dir,
+    sweep_low_dir,
+    to_volume_experiments_path,
+    volume_metrics_remote_path,
+    VOLUME_MOUNT as EXPERIMENTS_VOLUME_ROOT,
+)
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
-EXPERIMENTS_VOLUME_ROOT = "/experiments"
-MODAL_VOLUME_NAME = "soda-experiments"
+
+LOW_SWEEP_WANDB_PROJECT = "soda-sweep-low"
+HIGH_SWEEP_WANDB_PROJECT = "soda-sweep-high"
+LOW_SWEEP_WANDB_GROUP = "A4-lr-sweep"
+HIGH_SWEEP_WANDB_GROUP = "B4-lr-sweep"
 
 _OUTPUT_DIR_KEYS = ("train_low.output_dir", "train_high.output_dir")
 _VOLUME_PATH_KEYS = (*_OUTPUT_DIR_KEYS, "train_high.low_checkpoint")
@@ -32,14 +45,51 @@ class SweepTrial:
 
 
 def format_lr_tag(lr: float) -> str:
-    """Stable directory token for learning rates (``1e-4`` → ``lr1e-4``)."""
-    text = f"{lr:.0e}".replace("+", "")
+    """Stable directory token for learning rates (``1e-4`` → ``lr1.00e-04``)."""
+    text = f"{float(lr):.2e}".replace("+", "")
     return f"lr{text}"
 
 
-def default_low_lr_trials(*, num_epochs: int, batch_size: int = 64) -> list[SweepTrial]:
+def sweep_wandb_overrides(
+    *,
+    train_block: Literal["train_low", "train_high"],
+    run_name: str,
+    project: str,
+    group: str,
+    tags: tuple[str, ...] = (),
+) -> dict[str, str | int | float | bool | tuple[str, ...]]:
+    """Hydra overrides for labeled W&B sweep runs.
+
+    Uses ``++`` for optional sweep-only keys so overrides work even when the yaml
+    schema on Modal has not picked up ``wandb_run_name`` / ``wandb_group`` / ``wandb_tags``.
+    """
+    overrides: dict[str, str | int | float | bool | tuple[str, ...]] = {
+        f"{train_block}.wandb_enabled": True,
+        f"{train_block}.wandb_project": project,
+        f"++{train_block}.wandb_run_name": run_name,
+        f"++{train_block}.wandb_group": group,
+    }
+    if tags:
+        overrides[f"++{train_block}.wandb_tags"] = tags
+    return overrides
+
+
+def default_low_lr_grid() -> tuple[float, ...]:
+    """Log-spaced π_low LRs from ``3e-5`` to ``5e-4`` (7 trials, training_plan A4)."""
+    import numpy as np
+
+    values = np.logspace(np.log10(3e-5), np.log10(5e-4), num=7)
+    return tuple(float(x) for x in values)
+
+
+def default_low_lr_trials(
+    *,
+    num_epochs: int,
+    batch_size: int = 64,
+    task: str = "pusht",
+) -> list[SweepTrial]:
     """A4 grid from training_plan.md (LR only; batch fixed at 64)."""
-    lrs = (1e-4, 5e-5, 2e-4)
+    lrs = default_low_lr_grid()
     trials: list[SweepTrial] = []
     for lr in lrs:
         tag = format_lr_tag(lr)
@@ -50,22 +100,34 @@ def default_low_lr_trials(*, num_epochs: int, batch_size: int = 64) -> list[Swee
                     "train_low.num_epochs": num_epochs,
                     "train_low.lr": lr,
                     "train_low.batch_size": batch_size,
-                    "train_low.output_dir": f"experiments/sweep_low/{tag}",
-                    "train_low.wandb_enabled": True,
+                    "train_low.output_dir": sweep_low_dir(task, tag).as_posix(),
+                    **sweep_wandb_overrides(
+                        train_block="train_low",
+                        run_name=tag,
+                        project=LOW_SWEEP_WANDB_PROJECT,
+                        group=LOW_SWEEP_WANDB_GROUP,
+                        tags=("sweep", "pi_low", "A4"),
+                    ),
                 },
             )
         )
     return trials
 
 
+def default_high_lr_grid() -> tuple[float, ...]:
+    """π_high FM LRs for B4 (5 trials; architecture fixed at yaml defaults)."""
+    return (1e-5, 5e-5, 1e-4, 5e-4, 1e-3)
+
+
 def default_high_lr_trials(
     *,
     num_epochs: int,
     low_checkpoint: str,
+    task: str = "pusht",
 ) -> list[SweepTrial]:
-    """B4 default: FM learning rate only (other knobs stay at yaml defaults)."""
+    """B4: π_high learning rate sweep — ``hidden_dim``, ``num_layers`` stay at yaml defaults."""
     trials: list[SweepTrial] = []
-    for lr in (5e-5, 1e-4):
+    for lr in default_high_lr_grid():
         tag = format_lr_tag(lr)
         trials.append(
             SweepTrial(
@@ -74,69 +136,37 @@ def default_high_lr_trials(
                     "train_high.num_epochs": num_epochs,
                     "train_high.lr": lr,
                     "train_high.low_checkpoint": low_checkpoint,
-                    "train_high.output_dir": f"experiments/sweep_high/{tag}",
-                    "train_high.wandb_enabled": True,
+                    "train_high.output_dir": sweep_high_dir(task, tag).as_posix(),
+                    **sweep_wandb_overrides(
+                        train_block="train_high",
+                        run_name=tag,
+                        project=HIGH_SWEEP_WANDB_PROJECT,
+                        group=HIGH_SWEEP_WANDB_GROUP,
+                        tags=("sweep", "pi_high", "B4"),
+                    ),
                 },
             )
         )
     return trials
 
 
-def default_high_grid_trials(
-    *,
-    num_epochs: int,
-    low_checkpoint: str,
-) -> list[SweepTrial]:
-    """Full B4 factorial (2^4 = 16 trials) — use sparingly."""
-    trials: list[SweepTrial] = []
-    for lr in (5e-5, 1e-4):
-        for fm_hidden in (128, 256):
-            for infer_steps in (5, 10):
-                for embed_dim in (16, 32):
-                    tag = (
-                        f"{format_lr_tag(lr)}_fm{fm_hidden}"
-                        f"_steps{infer_steps}_emb{embed_dim}"
-                    )
-                    trials.append(
-                        SweepTrial(
-                            name=tag,
-                            overrides={
-                                "train_high.num_epochs": num_epochs,
-                                "train_high.lr": lr,
-                                "train_high.low_checkpoint": low_checkpoint,
-                                "high_policy.fm_hidden_dim": fm_hidden,
-                                "high_policy.num_inference_steps": infer_steps,
-                                "high_policy.option_embed_dim": embed_dim,
-                                "train_high.output_dir": f"experiments/sweep_high/{tag}",
-                                "train_high.wandb_enabled": True,
-                            },
-                        )
-                    )
-    return trials
+def format_hydra_override_value(value: Any) -> str:
+    """Serialize one Hydra CLI override value (handles lists and comma-containing strings)."""
+    if isinstance(value, (list, tuple)):
+        return f"[{','.join(str(v) for v in value)}]"
+    text = str(value)
+    if "," in text:
+        return f"'{text}'"
+    return text
 
 
 def hydra_override_args(overrides: dict[str, Any]) -> list[str]:
-    return [f"{key}={value}" for key, value in overrides.items()]
-
-
-def to_volume_experiments_path(path: str | Path) -> str:
-    """Map ``experiments/...`` to ``/experiments/...`` for Modal Volume writes."""
-    text = str(path).replace("\\", "/")
-    if text.startswith(f"{EXPERIMENTS_VOLUME_ROOT}/"):
-        return text
-    if text.startswith("experiments/"):
-        return f"{EXPERIMENTS_VOLUME_ROOT}/{text[len('experiments/'):]}"
-    return text
+    return [f"{key}={format_hydra_override_value(value)}" for key, value in overrides.items()]
 
 
 def local_mirror_for_experiments_path(path: str | Path) -> Path:
     """Local repo mirror used for post-sweep ranking (``experiments/...`` under repo root)."""
-    text = str(path).replace("\\", "/")
-    if text.startswith(f"{EXPERIMENTS_VOLUME_ROOT}/"):
-        return REPO_ROOT / "experiments" / text[len(f"{EXPERIMENTS_VOLUME_ROOT}/") :]
-    if Path(text).is_absolute():
-        return Path(text)
-    return REPO_ROOT / text
+    return _local_mirror_for_experiments_path(path, repo_root=REPO_ROOT)
 
 
 def modal_sweep_overrides(overrides: dict[str, Any]) -> dict[str, Any]:
@@ -200,7 +230,7 @@ def sync_trial_metrics_from_volume(
     dry_run: bool = False,
 ) -> bool:
     """Pull ``metrics.json`` from the Modal Volume into the local experiments mirror."""
-    remote_metrics = f"{volume_output_dir.rstrip('/')}/metrics.json"
+    remote_metrics = volume_metrics_remote_path(volume_output_dir)
     local_output_dir.mkdir(parents=True, exist_ok=True)
     local_metrics = local_output_dir / "metrics.json"
     cmd = [
@@ -217,9 +247,44 @@ def sync_trial_metrics_from_volume(
     try:
         subprocess.run(cmd, cwd=str(REPO_ROOT), check=True)
     except subprocess.CalledProcessError:
-        print(f"Warning: could not sync {remote_metrics} from Modal Volume")
+        print(
+            f"Warning: could not sync {remote_metrics} from Modal Volume "
+            f"(container path {volume_output_dir.rstrip('/')}/metrics.json)"
+        )
         return False
     return local_metrics.is_file()
+
+
+def sync_all_trial_metrics_from_volume(
+    trials: list[SweepTrial],
+    *,
+    dry_run: bool = False,
+) -> int:
+    """Pull ``metrics.json`` for every trial. Returns count successfully synced."""
+    synced = 0
+    for trial in trials:
+        local_dir, volume_dir = trial_rank_paths(trial)
+        if sync_trial_metrics_from_volume(
+            volume_output_dir=volume_dir,
+            local_output_dir=local_dir,
+            dry_run=dry_run,
+        ):
+            synced += 1
+    return synced
+
+
+def format_volume_metrics_get_command(
+    *,
+    volume_output_dir: str,
+    local_output_dir: Path,
+    volume_name: str = MODAL_VOLUME_NAME,
+) -> str:
+    """Human-readable ``modal volume get`` for one trial's ``metrics.json``."""
+    remote = volume_metrics_remote_path(volume_output_dir)
+    return (
+        f"modal volume get {volume_name} {remote} "
+        f"{local_output_dir / 'metrics.json'}"
+    )
 
 
 def rank_trials_from_local_mirror(
@@ -243,10 +308,7 @@ def rank_trials_from_local_mirror(
         print("\nTrials missing local metrics.json (ranking skipped for these):")
         for name, volume_dir in missing:
             local_dir = local_mirror_for_experiments_path(volume_dir)
-            print(
-                f"  {name}: modal volume get {MODAL_VOLUME_NAME} "
-                f"{volume_dir}/metrics.json {local_dir / 'metrics.json'}"
-            )
+            print(f"  {name}: {format_volume_metrics_get_command(volume_output_dir=volume_dir, local_output_dir=local_dir)}")
 
     if not ready:
         print("\nNo local metrics available — compare trials in W&B or sync from Volume.")
@@ -255,6 +317,20 @@ def rank_trials_from_local_mirror(
     ranked = rank_fn(ready)
     print_sweep_results(ranked)
     return ranked
+
+
+def _training_subprocess_env(*, run_readme: str) -> dict[str, str]:
+    """Env for local ``train_*.py`` subprocesses (repo + diffusion_policy on PYTHONPATH)."""
+    from soda.experiments.run_readme import RUN_README_ENV, validate_run_readme
+
+    env = os.environ.copy()
+    env[RUN_README_ENV] = validate_run_readme(run_readme)
+    repo = str(REPO_ROOT)
+    dp = str(REPO_ROOT / "third_party" / "diffusion_policy")
+    prefix = os.pathsep.join([repo, dp])
+    existing = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = prefix if not existing else f"{prefix}{os.pathsep}{existing}"
+    return env
 
 
 def run_train_script(
@@ -267,8 +343,6 @@ def run_train_script(
     dry_run: bool = False,
 ) -> None:
     """Invoke ``python soda/training/<script>.py`` with Hydra CLI overrides."""
-    from soda.experiments.run_readme import RUN_README_ENV, validate_run_readme
-
     config_dir = REPO_ROOT / "configs" / task
     cmd = [
         sys.executable,
@@ -282,8 +356,7 @@ def run_train_script(
     print(" ".join(cmd))
     if dry_run:
         return
-    env = os.environ.copy()
-    env[RUN_README_ENV] = validate_run_readme(run_readme)
+    env = _training_subprocess_env(run_readme=run_readme)
     subprocess.run(cmd, cwd=str(REPO_ROOT), check=True, env=env)
 
 
@@ -464,6 +537,92 @@ def run_sweep(
     return ranked
 
 
+def rank_sweep_trials(
+    trials: list[SweepTrial],
+    rank_fn: Callable[..., list[dict[str, Any]] | dict[str, list[dict[str, Any]]]],
+    *,
+    sync_modal: bool = False,
+    dry_run: bool = False,
+) -> list[dict[str, Any]] | dict[str, list[dict[str, Any]]]:
+    """Sync from Modal (optional) and rank trials from local ``metrics.json`` files."""
+    if sync_modal:
+        print(f"\nSyncing metrics.json from Modal Volume ({MODAL_VOLUME_NAME})...")
+        n = sync_all_trial_metrics_from_volume(trials, dry_run=dry_run)
+        print(f"Synced {n}/{len(trials)} trials.")
+    return rank_trials_from_local_mirror(trials, rank_fn)
+
+
+def _spawn_sequential_modal_sweep(
+    *,
+    modal_script: Literal["modal_train_low.py", "modal_train_high.py"],
+    trials: list[SweepTrial],
+    config_name: str,
+    task: str,
+    run_readme: str,
+    rank_script: str,
+    dry_run: bool = False,
+) -> None:
+    """
+    Spawn one Modal GPU container that runs all sweep trials sequentially.
+
+    Uses ``modal run --detach`` via subprocess so that:
+    - ``--detach`` appears BEFORE the script path (Modal CLI flag, not function arg)
+    - The Modal app stays alive after the local entrypoint exits
+    - Spawned functions survive even when this Python process exits
+    """
+    import json
+
+    _SWEEP_ENTRYPOINTS: dict[str, str] = {
+        "modal_train_low.py": "modal/modal_sweep_train_low.py",
+        "modal_train_high.py": "modal/modal_sweep_train_high.py",
+    }
+    sweep_entrypoint = _SWEEP_ENTRYPOINTS.get(modal_script)
+    if sweep_entrypoint is None:
+        raise ValueError(f"No sequential sweep entrypoint for {modal_script!r}")
+
+    trial_dicts: list[dict[str, Any]] = []
+    for trial in trials:
+        modal_overrides = modal_sweep_overrides(trial.overrides)
+        _, volume_dir = trial_rank_paths(trial)
+        print(f"  {trial.name}: {volume_dir}")
+        trial_dicts.append(
+            {
+                "name": trial.name,
+                "task": task,
+                "config_name": config_name,
+                "hydra_overrides": hydra_override_args(modal_overrides),
+                "run_readme": f"{run_readme} [{trial.name}]",
+            }
+        )
+
+    if dry_run:
+        print(f"\n(dry-run) Would spawn sequential sweep: {len(trial_dicts)} trials")
+        for td in trial_dicts:
+            print(f"  {td['name']}: {' '.join(td['hydra_overrides'])}")
+        return
+
+    # --detach BEFORE the script path — this is the Modal CLI flag.
+    # Without it, the ephemeral app stops when the entrypoint exits and kills the job.
+    cmd = [
+        "modal", "run", "--detach",
+        sweep_entrypoint,
+        "--trials-json", json.dumps(trial_dicts),
+        "--run-readme", run_readme,
+    ]
+    print(" ".join(cmd[:4] + [sweep_entrypoint, "--trials-json", "<...>", "--run-readme", run_readme]))
+    subprocess.run(cmd, cwd=str(REPO_ROOT), check=True)
+
+    print(f"\nAll {len(trial_dicts)} trials submitted to one Modal GPU (sequential).")
+    if trials:
+        example_local, example_volume = trial_rank_paths(trials[0])
+        print(
+            "After training, sync metrics and rank, e.g.:\n"
+            f"  modal volume get {MODAL_VOLUME_NAME} {example_volume}/metrics.json"
+            f" {example_local}/metrics.json\n"
+            f"  python {rank_script} --rank-only --sync-modal --num-epochs <N> ..."
+        )
+
+
 def run_modal_sweep(
     *,
     modal_script: Literal["modal_train_low.py", "modal_train_high.py"],
@@ -472,11 +631,31 @@ def run_modal_sweep(
     task: str,
     rank_fn: Callable[..., list[dict[str, Any]] | dict[str, list[dict[str, Any]]]],
     run_readme: str,
-    detach: bool = True,
+    detach: bool = False,
     dry_run: bool = False,
     stop_on_error: bool = True,
 ) -> list[dict[str, Any]] | dict[str, list[dict[str, Any]]]:
-    """Launch sweep trials on Modal, optionally sync metrics and rank locally."""
+    """
+    Launch sweep trials on Modal.
+
+    detach=True  (default, --modal): spawn ONE GPU container that runs all trials
+                 sequentially — no parallel quota hit, laptop can disconnect.
+    detach=False (--no-detach): run trials one at a time via subprocess, laptop blocked.
+    """
+    if detach:
+        print(f"\nLaunching {len(trials)} trials as a single sequential Modal job:")
+        _spawn_sequential_modal_sweep(
+            modal_script=modal_script,
+            trials=trials,
+            config_name=config_name,
+            task=task,
+            run_readme=run_readme,
+            rank_script=f"scripts/{modal_script.replace('modal_', 'sweep_')}",
+            dry_run=dry_run,
+        )
+        return []
+
+    # Non-detach: sequential subprocess calls; one trial at a time, laptop must stay on.
     volume_dirs: dict[str, str] = {}
     for trial in trials:
         print(f"\n=== Modal sweep trial: {trial.name} ===")
@@ -492,7 +671,7 @@ def run_modal_sweep(
                 task=task,
                 hydra_overrides=modal_overrides,
                 run_readme=f"{run_readme} [{trial.name}]",
-                detach=detach,
+                detach=False,
                 dry_run=dry_run,
             )
         except subprocess.CalledProcessError:
@@ -501,7 +680,7 @@ def run_modal_sweep(
             print(f"Trial {trial.name} failed — continuing.")
             continue
 
-        if dry_run or detach:
+        if dry_run:
             continue
 
         sync_trial_metrics_from_volume(
@@ -514,20 +693,6 @@ def run_modal_sweep(
         print("\n(dry-run — Modal jobs not launched; ranking skipped)")
         return []
 
-    if detach:
-        print(
-            "\nModal jobs launched detached. Artifacts persist on Volume under "
-            f"{EXPERIMENTS_VOLUME_ROOT}/sweep_low/ or {EXPERIMENTS_VOLUME_ROOT}/sweep_high/."
-        )
-        print(
-            "After jobs finish, sync metrics and rank locally, e.g.:\n"
-            f"  modal volume get {MODAL_VOLUME_NAME} "
-            f"{EXPERIMENTS_VOLUME_ROOT}/sweep_low/<trial>/metrics.json "
-            f"experiments/sweep_low/<trial>/metrics.json\n"
-            "Then re-run ranking with W&B or pull all trial dirs from the Volume."
-        )
-        return []
-
     return rank_trials_from_local_mirror(trials, rank_fn, volume_dirs=volume_dirs)
 
 
@@ -538,7 +703,7 @@ def spawn_modal_train(
     task: str,
     hydra_overrides: dict[str, Any],
     run_readme: str,
-    detach: bool = True,
+    detach: bool = False,
     dry_run: bool = False,
 ) -> None:
     """Run one trial on Modal (uses ``modal run modal/<script> --hydra-overrides ...``).
@@ -547,9 +712,13 @@ def spawn_modal_train(
     when starting from local ``experiments/...`` dirs.
     """
     override_text = " ".join(hydra_override_args(hydra_overrides))
-    cmd = [
-        "modal",
-        "run",
+    # --detach must come BEFORE the script path — it is a Modal CLI flag, not a
+    # function argument. Without it the ephemeral app stops when the entrypoint
+    # exits and kills the spawned job.
+    cmd = ["modal", "run"]
+    if detach:
+        cmd.append("--detach")
+    cmd += [
         f"modal/{modal_script}",
         "--config-name",
         config_name,
@@ -560,8 +729,6 @@ def spawn_modal_train(
         "--run-readme",
         run_readme,
     ]
-    if detach:
-        cmd.append("--detach")
     print(" ".join(cmd))
     if dry_run:
         return

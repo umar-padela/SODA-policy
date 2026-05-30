@@ -70,6 +70,6 @@ def test_beta_metrics_from_counts_perfect_and_precision_at():
         high_prob_threshold=0.9,
     )
     noisy_metrics = beta_metrics_from_counts(noisy, high_prob_threshold=0.9)
-    assert noisy_metrics["beta_acc_neg"] == 1.0
-    assert noisy_metrics["beta_acc_pos"] == 0.5
+    assert noisy_metrics["beta_acc_neg"] == 0.5   # 1 TN out of 2 negatives (1 FP)
+    assert noisy_metrics["beta_acc_pos"] == 1.0   # 1 TP out of 1 positive
     assert noisy_metrics["beta_precision_at_0_9"] == 0.5

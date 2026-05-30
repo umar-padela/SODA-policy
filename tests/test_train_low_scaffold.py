@@ -20,20 +20,73 @@ class _FakeDataset:
         self._option_ids = np.asarray(option_ids)
 
 
-def test_train_low_config_from_hydra():
-    cfg = {
-        "train_low": {
-            "num_epochs": 3,
-            "batch_size": 8,
-            "lr": 2e-4,
-            "wandb_enabled": True,
-        }
+def _minimal_train_low_block(**overrides) -> dict:
+    """Minimal valid train_low config block (all required keys present)."""
+    base = {
+        "device": "cpu",
+        "seed": 42,
+        "batch_size": 8,
+        "weight_decay": 1e-6,
+        "checkpoint_every": 10,
+        "output_dir": None,
+        "wandb_enabled": False,
+        "wandb_project": "soda-test",
+        "wandb_run_name": None,
+        "wandb_group": None,
+        "wandb_tags": [],
+        "finetune_dp_checkpoint": None,
+        "num_workers": 2,
+        "option_balance": "none",
+        "use_ema": False,
+        "lr_schedule_type": "plateau",
+        "lr_plateau_patience": 10,
+        "lr_plateau_patience_beta": None,
+        "lr_plateau_factor": 0.5,
+        "lr_plateau_min_lr": 1e-6,
+        "beta_stratified_batches": False,
+        "two_phase": False,
+        "num_epochs": 3,
+        "lr": 2e-4,
+        "lr_warmup_epochs": 0,
+        "beta_lr": None,
+        "termination_loss_weight": 0.0,
+        "termination_pos_weight": 1.0,
+        "mask_diffusion_on_positive": False,
+        "all_anchors": False,
+        "best_checkpoint_metric": "loss_diffusion",
+        "warmstart_unet": None,
+        "checkpoint": None,
+        "skip_diffusion_loss": False,
+        "termination_stop_grad": True,
+        "run_readme": None,
     }
+    base.update(overrides)
+    return base
+
+
+def test_train_low_config_from_hydra():
+    cfg = {"train_low": _minimal_train_low_block(num_epochs=3, batch_size=8, lr=2e-4, wandb_enabled=True)}
     out = TrainLowConfig.from_hydra(cfg)
     assert out.num_epochs == 3
     assert out.batch_size == 8
     assert out.lr == 2e-4
     assert out.wandb_enabled is True
+
+
+def test_train_low_config_wandb_sweep_fields():
+    cfg = {
+        "train_low": _minimal_train_low_block(
+            wandb_project="soda-sweep-low",
+            wandb_run_name="lr3.00e-05",
+            wandb_group="A4-lr-sweep",
+            wandb_tags="sweep,pi_low,A4",
+        )
+    }
+    out = TrainLowConfig.from_hydra(cfg)
+    assert out.wandb_project == "soda-sweep-low"
+    assert out.wandb_run_name == "lr3.00e-05"
+    assert out.wandb_group == "A4-lr-sweep"
+    assert out.wandb_tags == ("sweep", "pi_low", "A4")
 
 
 def test_pusht_shape_meta_action_dim():
@@ -48,7 +101,6 @@ def test_low_policy_config_from_hydra():
             "num_options": 5,
             "option_embed_dim": 16,
             "bottleneck_dim": 1024,
-            "termination_loss_weight": 0.5,
             "termination_input": "obs",
             "termination_stop_grad": False,
             "termination_head": {
@@ -59,7 +111,7 @@ def test_low_policy_config_from_hydra():
         }
     }
     ds = _FakeDataset([0, 1, 2, 1, 0])
-    lp = _low_policy_config(cfg, ds, termination_pos_weight=10.0)
+    lp = _low_policy_config(cfg, ds, termination_loss_weight=0.5, termination_pos_weight=10.0)
     assert lp.num_options == 5
     assert lp.termination_loss_weight == 0.5
     assert lp.termination_input == "obs"

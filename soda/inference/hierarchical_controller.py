@@ -1,46 +1,42 @@
 """
 Hierarchical SODA controller for sim eval (π_high + π_low + termination β).
 
-Mirrors the DP ``BaseImagePolicy.predict_action`` interface. Training produces a
-full action chunk (variable horizon for SODA); **eval** chooses how many rows to
-execute before replanning via ``HierarchicalPolicyConfig.n_action_steps`` (default
-8 = receding-horizon control, same protocol as vanilla DP).
+Mirrors the DP ``BaseImagePolicy.predict_action`` interface. π_high selects ω;
+``LowLevelChunkExecutor`` runs π_low until β fires (segment exit). If the
+decompressed native chunk is exhausted before β fires, π_low replans under the
+same ω — execution is not capped at ``n_action_steps``.
 
 Each sim step:
 
-1. **β (every step, once a plan exists):** ``pi_low.predict_beta`` on the cached
-   ``action_pred`` at ``t=0`` with current obs + ω → ``TerminationHead``.
-2. **Replan** when β fires, the cache is empty, or
-   ``min(native_len, n_action_steps)`` native rows have been executed.
-3. **Return** the next row from π_low's cached ``action_unstretched`` chunk.
-
-β is evaluated on **every** sim step while executing a cached chunk; diffusion
-replanning happens at most every ``n_action_steps`` steps unless β fires earlier.
+1. **β (every step, including after replan):** ``pi_low.predict_beta`` on cached plan.
+2. **Segment exit** when β fires → π_high resamples ω, clear cache, replan.
+3. **Replan diffusion** when cache is empty or native chunk exhausted (same ω).
+4. **Return** the next row from ``action_unstretched``.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import torch
 
+from soda.inference.low_level_executor import (
+    HierarchicalPolicyConfig,
+    LowLevelChunkExecutor,
+    LowLevelStepResult,
+)
+from soda.option_discovery.supervised.pusht.frame_overlays import (
+    LowPolicyOverlayInfo,
+    duration_channel_stats,
+)
 
-@dataclass
-class HierarchicalPolicyConfig:
-    """Eval-time wiring (Hydra yaml + checkpoint loader)."""
-
-    config_name: str = "soda_supervised"
-    option_id_key: str = "option_id_supervised"
-    env_action_dim: int = 2
-    n_action_steps: int = 8  # eval-only receding-horizon execute window before replan
-    beta_transition: float = 0.5
-    beta_diffusion_t: int = 0
+__all__ = ["HierarchicalPolicy", "HierarchicalPolicyConfig"]
 
 
 class HierarchicalPolicy:
-    """π_high selects ω; π_low diffuses chunks; β may end a segment early."""
+    """π_high selects ω; π_low diffuses chunks; β ends a segment."""
 
     def __init__(
         self,
@@ -57,13 +53,19 @@ class HierarchicalPolicy:
         self.checkpoint = checkpoint
         self._pi_high = pi_high
         self._pi_low = pi_low
-
+        self._executor: LowLevelChunkExecutor | None = None
         self._current_option_id: torch.Tensor | None = None
-        self._cached_action: torch.Tensor | None = None
-        self._cached_action_pred: torch.Tensor | None = None
-        self._cached_action_native: torch.Tensor | None = None  # (B, native_steps, D)
-        self._cursor: int = 0
-        self._last_beta: torch.Tensor | None = None
+        self._prev_option_id: int | None = None  # None = episode start (null token)
+        self._last_overlay: LowPolicyOverlayInfo = LowPolicyOverlayInfo()
+        self._last_option_id: int | None = None
+
+    @property
+    def last_overlay(self) -> LowPolicyOverlayInfo:
+        return self._last_overlay
+
+    @property
+    def last_option_id(self) -> int | None:
+        return self._last_option_id
 
     def set_control(
         self,
@@ -80,18 +82,6 @@ class HierarchicalPolicy:
         if updates:
             self.config = replace(self.config, **updates)
 
-    def reset(self) -> None:
-        self._current_option_id = None
-        self._cached_action = None
-        self._cached_action_pred = None
-        self._cached_action_native = None
-        self._cursor = 0
-        self._last_beta = None
-        if self._pi_high is not None and hasattr(self._pi_high, "reset"):
-            self._pi_high.reset()
-        if self._pi_low is not None and hasattr(self._pi_low, "reset"):
-            self._pi_low.reset()
-
     def _require_policies(self) -> tuple[Any, Any]:
         if self._pi_high is None or self._pi_low is None:
             raise NotImplementedError(
@@ -99,103 +89,118 @@ class HierarchicalPolicy:
             )
         return self._pi_high, self._pi_low
 
-    def _n_action_steps(self, pi_low: Any) -> int:
-        _ = pi_low
-        return max(1, int(self.config.n_action_steps))
+    def _executor_for(self, pi_low: Any) -> LowLevelChunkExecutor:
+        if self._executor is None or self._executor.pi_low is not pi_low:
+            self._executor = LowLevelChunkExecutor(pi_low, self.config)
+        else:
+            self._executor.config = self.config
+        return self._executor
 
-    def _strip_env_actions(self, action: torch.Tensor) -> torch.Tensor:
-        dim = int(self.config.env_action_dim)
-        if action.shape[-1] <= dim:
-            return action
-        return action[..., :dim]
+    def reset(self) -> None:
+        self._current_option_id = None
+        self._prev_option_id = None
+        self._last_overlay = LowPolicyOverlayInfo()
+        self._last_option_id = None
+        if self._executor is not None:
+            self._executor.reset()
+        elif self._pi_low is not None and hasattr(self._pi_low, "reset"):
+            self._pi_low.reset()
+        if self._pi_high is not None and hasattr(self._pi_high, "reset"):
+            self._pi_high.reset()
+
+    def _overlay_from_result(self, result: LowLevelStepResult) -> LowPolicyOverlayInfo:
+        beta_val = None
+        if result.beta is not None:
+            beta_val = float(result.beta.reshape(-1)[0].detach().cpu().item())
+        dur_mean = dur_std = decoded_native = horizon = None
+        pred = result.action_pred
+        if pred is None and self._executor is not None:
+            pred = self._executor.cached_action_pred
+        if pred is not None and self._pi_low is not None:
+            pred_np = pred.detach().cpu().numpy()
+            try:
+                hor = int(self._pi_low.horizon)
+                dur_mean, dur_std, decoded_native = duration_channel_stats(
+                    pred_np, horizon=hor
+                )
+                horizon = hor
+            except Exception:
+                pass
+        cursor = self._executor.chunk_cursor if self._executor is not None else None
+        return LowPolicyOverlayInfo(
+            beta=beta_val,
+            duration_mean=dur_mean,
+            duration_std=dur_std,
+            horizon=horizon,
+            decoded_native_steps=decoded_native,
+            chunk_cursor=cursor,
+            replan=result.replanned,
+            beta_threshold=float(self.config.beta_transition),
+        )
 
     def _sample_option(self, pi_high: Any, obs_dict: dict[str, Any]) -> torch.Tensor:
-        return pi_high.sample_option(pi_high.encode_obs(obs_dict))
-
-    def _check_beta(
-        self, pi_low: Any, obs_dict: dict[str, Any], option_id: torch.Tensor
-    ) -> torch.Tensor | None:
-        if self._cached_action_pred is None:
-            return None
-        beta = pi_low.predict_beta(
-            obs_dict,
-            option_id,
-            self._cached_action_pred,
-            diffusion_t=self.config.beta_diffusion_t,
+        return pi_high.sample_option(
+            pi_high.encode_obs(obs_dict),
+            prev_option_id=self._prev_option_id,
         )
-        self._last_beta = beta
-        return beta
-
-    def _beta_fired(self, beta: torch.Tensor | None) -> bool:
-        if beta is None:
-            return False
-        return bool((beta > self.config.beta_transition).any())
-
-    def _run_diffusion(
-        self,
-        pi_low: Any,
-        obs_dict: dict[str, Any],
-        option_id: torch.Tensor,
-    ) -> None:
-        out = pi_low.predict_action(obs_dict, option_id)
-        self._cached_action = out["action"]
-        self._cached_action_pred = out["action_pred"]
-        self._cached_action_native = out.get("action_unstretched")  # (B, native_steps, D)
-        self._cursor = 0
-
-    def _needs_diffusion(self, pi_low: Any, beta: torch.Tensor | None) -> bool:
-        if self._cached_action is None or self._cached_action_pred is None:
-            return True
-        if self._beta_fired(beta):
-            return True
-        if self._cached_action_native is not None:
-            native_len = int(self._cached_action_native.shape[1])
-            cap = min(native_len, self._n_action_steps(pi_low))
-            return self._cursor >= cap
-        # Fallback: fixed receding-horizon window (P0 protocol).
-        if self._cursor >= self._n_action_steps(pi_low):
-            return True
-        if self._cursor >= int(self._cached_action.shape[1]):
-            return True
-        return False
 
     @torch.no_grad()
     def predict_action(self, obs_dict: dict[str, Any]) -> dict[str, Any]:
         """
         Return the next single env action from the hierarchical stack.
 
-        ``soda_runner`` calls this once per sim step. Replan window size comes
-        from ``config.n_action_steps`` (eval yaml; default 8).
+        ``soda_runner`` calls this once per sim step. Low-level segments end only
+        when β fires; chunk exhaustion triggers replan under the current ω.
         """
         pi_high, pi_low = self._require_policies()
+        executor = self._executor_for(pi_low)
 
-        if self._current_option_id is None:
-            self._current_option_id = self._sample_option(pi_high, obs_dict)
-
-        beta = self._check_beta(pi_low, obs_dict, self._current_option_id)
-        if self._beta_fired(beta):
-            self._current_option_id = self._sample_option(pi_high, obs_dict)
-            self._cached_action = None
-            self._cached_action_pred = None
-            self._cached_action_native = None
-
-        if self._needs_diffusion(pi_low, beta):
-            self._run_diffusion(pi_low, obs_dict, self._current_option_id)
-
-        assert self._cached_action is not None
-        cursor = self._cursor
-        if self._cached_action_native is not None:
-            # Execute from the decompressed native-time chunk (variable-horizon path).
-            action = self._cached_action_native[:, cursor : cursor + 1]
+        # open_loop: resample ω from π_high after every full native chunk; β disabled.
+        # duration_termination: receding-horizon π_low (n_action_steps cap); π_high called
+        #   only when the chunk is exhausted before n_action_steps (duration channel fires).
+        #   Long chunks (≥ n_action_steps) replan π_low under the same ω.
+        if self.config.open_loop:
+            if self._current_option_id is None or executor.needs_replan:
+                if self._current_option_id is not None:
+                    self._prev_option_id = int(self._current_option_id.reshape(-1)[0].item())
+                self._current_option_id = self._sample_option(pi_high, obs_dict)
+            result = executor.step(obs_dict, self._current_option_id)
+        elif self.config.duration_termination:
+            need_new_option = (
+                self._current_option_id is None
+                or (executor.needs_replan and executor.option_done)
+            )
+            if need_new_option:
+                if self._current_option_id is not None:
+                    self._prev_option_id = int(self._current_option_id.reshape(-1)[0].item())
+                self._current_option_id = self._sample_option(pi_high, obs_dict)
+            result = executor.step(obs_dict, self._current_option_id)
         else:
-            # Fallback: fixed receding-horizon from the stretched prediction window.
-            action = self._strip_env_actions(self._cached_action)[:, cursor : cursor + 1]
-        self._cursor = cursor + 1
+            if self._current_option_id is None:
+                self._current_option_id = self._sample_option(pi_high, obs_dict)
 
-        result: dict[str, Any] = {
-            "action": action,
-            "action_pred": self._cached_action_pred,
+            for _ in range(8):
+                result = executor.step(obs_dict, self._current_option_id)
+                if result.beta_fired:
+                    self._prev_option_id = int(self._current_option_id.reshape(-1)[0].item())
+                    self._current_option_id = self._sample_option(pi_high, obs_dict)
+                    executor.clear_cache()
+                    continue
+                break
+            else:
+                raise RuntimeError("β fired repeatedly after replan; check beta_transition")
+
+        self._last_option_id = (
+            int(self._current_option_id.reshape(-1)[0].item())
+            if self._current_option_id is not None
+            else None
+        )
+        self._last_overlay = self._overlay_from_result(result)
+
+        result_dict: dict[str, Any] = {
+            "action": result.action,
+            "action_pred": result.action_pred,
         }
-        if self._last_beta is not None:
-            result["beta"] = self._last_beta
-        return result
+        if result.beta is not None:
+            result_dict["beta"] = result.beta
+        return result_dict

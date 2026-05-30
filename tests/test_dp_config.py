@@ -33,4 +33,4 @@ def test_build_columbia_workspace_cfg_uses_train_blocks():
 
 def test_resolve_dp_output_dir_default():
     cfg = load_pusht_yaml("configs/pusht/dp.yaml")
-    assert resolve_dp_output_dir(cfg).as_posix().endswith("experiments/train_dp/dp")
+    assert resolve_dp_output_dir(cfg).as_posix().endswith("experiments/pusht/train_dp/dp")

@@ -30,13 +30,13 @@ def test_build_eval_output_dir_layout():
         timestamp=ts,
     )
     assert returned_ts == ts
-    assert out == Path("/experiments/eval/dp_frozen/20260525/014851")
+    assert out == Path("/experiments/pusht/eval/dp_frozen/20260525/014851")
 
 
 def test_run_dir_name_from_path():
     root = Path("/experiments")
-    out = root / "eval" / "dp_frozen" / "20260525" / "014851"
-    assert run_dir_name_from_path(out, root) == "dp_frozen/20260525/014851"
+    out = root / "pusht" / "eval" / "dp_frozen" / "20260525" / "014851"
+    assert run_dir_name_from_path(out, root) == "pusht/dp_frozen/20260525/014851"
 
 
 def test_cli_overrides_dict_skips_defaults():
