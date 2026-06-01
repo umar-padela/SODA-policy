@@ -19,8 +19,7 @@ import modal
 sys.path.insert(0, str(Path(__file__).parent))
 from modal_config import app, image, volume, EXPERIMENTS_MOUNT  # noqa: E402
 
-# Extend the base image with pybullet (not needed for training, only data gen).
-block_push_image = image.pip_install("pybullet")
+block_push_image = image  # pybullet is now in the base image
 
 VOLUME_DATA_DIR  = f"{EXPERIMENTS_MOUNT}/data/raw/block_push"
 VOLUME_ZARR_PATH = f"{VOLUME_DATA_DIR}/block_push.zarr"

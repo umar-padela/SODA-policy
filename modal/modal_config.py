@@ -140,6 +140,7 @@ image = (
         "shapely==1.8.4",
         "psutil==5.9.2",
         "click==8.0.4",
+        "pybullet",       # block push data generation
     )
     # PyAV: conda pins 10.0.0; pip has no py3.10 wheel for 10.x (Cython build fails on Modal).
     # 12.3.0 ships manylinux binaries — same API used by diffusion_policy VideoRecorder.
