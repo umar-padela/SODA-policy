@@ -28,7 +28,7 @@ from modal_config import app, rollout_hierarchical, eval_run, volume, image, EXP
 from soda.experiments.paths import MODAL_VOLUME_NAME, volume_relative_path  # noqa: E402
 
 HIGH_CHECKPOINT = (
-    "/experiments/pusht/train_high_conditioned_prev_option/best.ckpt"
+    "/experiments/final_experiments/pusht/high_study/high_starts_prev_opt/best.ckpt"
 )
 N_EPISODES = 50
 TEST_START_SEED = 100000
@@ -93,7 +93,7 @@ def _print_summary(data: dict) -> None:
 @app.function(
     image=image,
     gpu=None,
-    timeout=7200,
+    timeout=86400,
     volumes={EXPERIMENTS_MOUNT: volume},
 )
 def _eval_aggregate_comparison(
@@ -142,41 +142,53 @@ def _eval_aggregate_comparison(
 
     result = dict(existing)
 
-    if soda_call is not None:
-        soda_result = soda_call.get()
-        soda_episodes = soda_result.get("episodes") or []
-        soda_scores = [ep["metrics"].get("max_overlap_full", 0.0) for ep in soda_episodes]
-        result["soda"] = {
-            "checkpoint": soda_checkpoint,
-            "config": soda_config,
-            "n_action_steps": n_action_steps,
-            "n_episodes": len(soda_scores),
-            "mean_score": float(np.mean(soda_scores)) if soda_scores else 0.0,
-            "std_score": float(np.std(soda_scores)) if soda_scores else 0.0,
-            "per_episode_scores": soda_scores,
-        }
-        print(f"  SODA: mean={result['soda']['mean_score']:.4f} ± {result['soda']['std_score']:.4f}")
-
-    if dp_call is not None:
-        dp_result = dp_call.get()
-        dp_metrics = dp_result.get("metrics", {})
-        dp_mean = float(dp_metrics.get("mean_score@300", dp_metrics.get("mean_score", 0.0)))
-        result["dp_baseline"] = {
-            "checkpoint": dp_checkpoint,
-            "config": dp_config,
-            "n_episodes": N_EPISODES,
-            "mean_score": dp_mean,
-            "std_score": 0.0,
-            "metrics": dp_metrics,
-        }
-        print(f"  DP baseline: mean={dp_mean:.4f}")
-
     vol_path = Path(VOLUME_OUTPUT_PATH)
     vol_path.parent.mkdir(parents=True, exist_ok=True)
-    vol_path.write_text(json.dumps(result, indent=2))
-    volume.commit()
-    print(f"Saved to volume → {VOLUME_OUTPUT_PATH}")
 
+    if soda_call is not None:
+        try:
+            soda_result = soda_call.get()
+            soda_episodes = soda_result.get("episodes") or []
+            soda_scores = [ep["metrics"].get("max_overlap_full", 0.0) for ep in soda_episodes]
+            result["soda"] = {
+                "checkpoint": soda_checkpoint,
+                "config": soda_config,
+                "n_action_steps": n_action_steps,
+                "n_episodes": len(soda_scores),
+                "mean_score": float(np.mean(soda_scores)) if soda_scores else 0.0,
+                "std_score": float(np.std(soda_scores)) if soda_scores else 0.0,
+                "per_episode_scores": soda_scores,
+            }
+            print(f"  SODA: mean={result['soda']['mean_score']:.4f} ± {result['soda']['std_score']:.4f}")
+            vol_path.write_text(json.dumps(result, indent=2))
+            volume.commit()
+        except Exception as e:
+            print(f"  SODA: FAILED ({e}) — skipping")
+
+    if dp_call is not None:
+        try:
+            dp_result = dp_call.get()
+            dp_episodes = dp_result.get("episodes") or []
+            dp_scores = [ep["metrics"].get("max_overlap_full", 0.0) for ep in dp_episodes]
+            dp_metrics = dp_result.get("metrics", {})
+            dp_mean = float(np.mean(dp_scores)) if dp_scores else float(dp_metrics.get("mean_score@300", dp_metrics.get("mean_score", 0.0)))
+            dp_std = float(np.std(dp_scores)) if dp_scores else 0.0
+            result["dp_baseline"] = {
+                "checkpoint": dp_checkpoint,
+                "config": dp_config,
+                "n_episodes": len(dp_scores) or N_EPISODES,
+                "mean_score": dp_mean,
+                "std_score": dp_std,
+                "per_episode_scores": dp_scores,
+                "metrics": dp_metrics,
+            }
+            print(f"  DP baseline: mean={dp_mean:.4f} ± {dp_std:.4f}")
+            vol_path.write_text(json.dumps(result, indent=2))
+            volume.commit()
+        except Exception as e:
+            print(f"  DP baseline: FAILED ({e}) — skipping")
+
+    print(f"Saved to volume → {VOLUME_OUTPUT_PATH}")
     return result
 
 

@@ -1,0 +1,88 @@
+# Vanilla Diffusion Policy — Push-T image CNN, kernel_size=9.
+# Identical to dp.yaml (Columbia defaults) except kernel_size: 9 vs 5.
+
+name: dp_k9
+
+# --- Layout (Columbia DP protocol) ---
+n_obs_steps: 2
+n_action_steps: 8
+horizon: 16
+past_action_visible: false
+obs_as_global_cond: true
+
+task:
+  name: pusht_image
+  env_runner:
+    legacy_test: true
+    test_start_seed: 100000
+    max_steps: 300
+    fps: 10
+    crf: 22
+    render_size: 96
+    tqdm_interval_sec: 5.0
+  dataset:
+    zarr_path: data/raw/pusht/pusht.zarr
+    val_ratio: 0.02
+    seed: 42
+    max_train_episodes: 90  # Columbia default — caps at 90 of 206 available demos
+    pad_before: 1
+    pad_after: 7
+    num_workers: 8
+
+policy:
+  _target_: diffusion_policy.policy.diffusion_unet_hybrid_image_policy.DiffusionUnetHybridImagePolicy
+  crop_shape: [84, 84]
+  num_inference_steps: 100
+  diffusion_step_embed_dim: 128
+  down_dims: [512, 1024, 2048]
+  kernel_size: 9  # only change vs dp.yaml (Columbia default is 5)
+  n_groups: 8
+  cond_predict_scale: true
+  eval_fixed_crop: true
+  obs_encoder_group_norm: true
+
+noise_scheduler:
+  num_train_timesteps: 100
+  beta_start: 0.0001
+  beta_end: 0.02
+  beta_schedule: squaredcos_cap_v2
+  clip_sample: true
+  prediction_type: epsilon
+  variance_type: fixed_small
+
+train_dp:
+  _target_: diffusion_policy.workspace.train_diffusion_unet_hybrid_workspace.TrainDiffusionUnetHybridWorkspace
+  device: cuda:0
+  seed: 42
+  num_epochs: 500
+  batch_size: 64
+  lr: 1.0e-4
+  lr_scheduler: cosine      # Columbia default
+  lr_warmup_steps: 500      # Columbia default
+  weight_decay: 1.0e-6
+  use_ema: true
+  checkpoint_every: 50
+  rollout_every: 50
+  val_every: 1
+  output_dir: /experiments/final_experiments/pusht/comparison_study/dp_k9
+  wandb_enabled: true
+  wandb_project: soda-train-dp
+
+optimizer:
+  _target_: torch.optim.AdamW
+  lr: 1.0e-4
+  betas: [0.95, 0.999]
+  eps: 1.0e-8
+  weight_decay: 1.0e-6
+
+checkpoint:
+  volume_path: /experiments/final_experiments/pusht/comparison_study/dp_k9/latest.ckpt
+
+eval:
+  wandb_enabled: true
+  wandb_project: soda-eval
+  policy: dp
+  smoke:
+    n_test: 5
+  full:
+    n_test: 50

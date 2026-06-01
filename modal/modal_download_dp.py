@@ -10,12 +10,13 @@ from modal_config import FROZEN_DP_PUSHT_CHECKPOINT, app, download_frozen_dp, sp
 
 
 @app.local_entrypoint()
-def main(dest: str = FROZEN_DP_PUSHT_CHECKPOINT):
+def main(dest: str = FROZEN_DP_PUSHT_CHECKPOINT, best: bool = False):
     path = spawn_modal_function(
         download_frozen_dp,
         label="download_frozen_dp",
         dest_path=dest,
+        best=best,
     )
-    print(f"\nUse for smoke eval:\n")
-    print(f"  modal run modal/modal_eval.py --config configs/pusht/dp_frozen.yaml")
+    ckpt = path.replace("latest.ckpt", "best.ckpt") if best else path
+    print(f"\nCheckpoint on volume: {ckpt}")
 

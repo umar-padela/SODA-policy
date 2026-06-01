@@ -1,14 +1,24 @@
 """
 Eval stage2 runs + duration_termination baseline — termination_study stage 2 eval.
 
+Stage 2 compares three variants:
+  - bottleneck_best: winner from stage 1a (passed via --bottleneck-best-dir)
+  - obs_best:        winner from stage 1b (passed via --obs-best-dir)
+  - both:            newly trained concat(obs+bottleneck) from stage2/both/
+
+bottleneck_best and obs_best are reused from prior stages — no retraining.
+Only `both` has new checkpoints in stage2/both/.
+
 Incremental: loads existing results from Modal Volume (authoritative) or local fallback,
 skips already-evaluated (run, epoch) pairs. Safe to re-run.
 
 All collection and saving happens inside a Modal remote function, so the local terminal
 can be closed after spawning. Use --detach to return immediately:
 
-  modal run --detach experiments/final_experiments/pusht/termination_study/stage2_input_comparison/modal_eval_stage2.py \\
-    --bottleneck-best-dir /experiments/final_experiments/pusht/termination_study/stage1/bottleneck_expert
+  modal run --detach experiments/final_experiments/pusht/termination_study/stage2_input_comparison/modal_eval_stage2.py
+
+Update BOTTLENECK_BEST_DIR/CONFIG and OBS_BEST_DIR/CONFIG constants at the top of this
+file after stage 1a/1b results are in before running.
 
 If the terminal closes mid-run, re-running will find the completed results on the volume.
 """
@@ -29,30 +39,63 @@ from modal_config import app, rollout_hierarchical, volume, image, EXPERIMENTS_M
 from soda.experiments.paths import MODAL_VOLUME_NAME, volume_relative_path  # noqa: E402
 
 HIGH_CHECKPOINT = (
-    "/experiments/pusht/train_high_conditioned_prev_option/best.ckpt"
+    "/experiments/final_experiments/pusht/high_study/high_starts_prev_opt/best.ckpt"
 )
 N_EPISODES = 50
 TEST_START_SEED = 100000
+
+# === UPDATE AFTER STAGE 1a/1b RESULTS ARE IN ===
+# Set to whichever run won each stage.
+BOTTLENECK_BEST_DIR = "/experiments/final_experiments/pusht/termination_study/stage1/bottleneck_expert"
+BOTTLENECK_BEST_CONFIG = "configs/pusht/exp_term_bottleneck_expert.yaml"
+OBS_BEST_DIR = "/experiments/final_experiments/pusht/termination_study/stage1b/obs_positive"
+OBS_BEST_CONFIG = "configs/pusht/exp_term_obs_positive.yaml"
 
 OUTPUT_PATH = Path(
     "experiments/final_experiments/pusht/termination_study/stage2_input_comparison/stage2_results.json"
 )
 VOLUME_OUTPUT_PATH = (
-    f"{EXPERIMENTS_MOUNT}/final_experiments/pusht/termination_study/stage2_input_comparison/stage2_results.json"
+    f"{EXPERIMENTS_MOUNT}/final_experiments/pusht/termination_study/stage2/stage2_results.json"
+)
+LOCAL_DEBUG_DIR = Path(
+    "experiments/final_experiments/pusht/termination_study/stage2_input_comparison/debug_videos"
 )
 
 STAGE2_CONFIGS = {
-    "obs": {
-        "low_dir": "/experiments/final_experiments/pusht/termination_study/stage2/obs",
-        "config": "configs/pusht/exp_term_obs.yaml",
-        "duration_termination": False,
-    },
     "both": {
         "low_dir": "/experiments/final_experiments/pusht/termination_study/stage2/both",
         "config": "configs/pusht/exp_term_both.yaml",
         "duration_termination": False,
     },
 }
+
+
+def _download_worst_videos(vol: modal.Volume, results: dict, n_worst: int = 5) -> None:
+    downloaded = 0
+    for run_label, run_results in results.items():
+        for r in run_results:
+            epoch = r["epoch"]
+            scores = r.get("per_episode_scores", [])
+            if not scores:
+                continue
+            worst = [i for i, _ in sorted(enumerate(scores), key=lambda x: x[1])[:n_worst]]
+            vol_base = f"final_experiments/pusht/termination_study/stage2/debug_videos/{run_label}/epoch_{epoch:04d}"
+            out_dir = LOCAL_DEBUG_DIR / run_label / f"epoch_{epoch:04d}"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            for ep_idx in worst:
+                seed = TEST_START_SEED + ep_idx
+                fname = f"ep{ep_idx:04d}_seed{seed}.mp4"
+                out_file = out_dir / fname
+                if out_file.exists():
+                    continue
+                try:
+                    data = b"".join(vol.read_file(volume_relative_path(f"/experiments/{vol_base}/{fname}")))
+                    out_file.write_bytes(data)
+                    print(f"  {run_label}/epoch_{epoch:04d}/{fname}  ({scores[ep_idx]:.1f}%)")
+                    downloaded += 1
+                except Exception:
+                    pass
+    print(f"  {downloaded} video(s) → {LOCAL_DEBUG_DIR}")
 
 
 def _run_plot(output_path: Path) -> None:
@@ -146,6 +189,10 @@ def _eval_aggregate_stage2(
     # Spawn all rollouts in parallel
     calls = []
     for item in work_items:
+        debug_video_dir = (
+            f"/experiments/final_experiments/pusht/termination_study/stage2"
+            f"/debug_videos/{item['run_label']}/epoch_{item['epoch']:04d}"
+        )
         call = rollout_hierarchical.spawn(
             config_path=item["config"],
             high_checkpoint=HIGH_CHECKPOINT,
@@ -156,7 +203,8 @@ def _eval_aggregate_stage2(
             duration_termination=item.get("duration_termination", False),
             open_loop=False,
             max_steps=300,
-            no_video=True,
+            no_video=False,
+            output_dir=debug_video_dir,
         )
         calls.append((item, call))
 
@@ -173,7 +221,8 @@ def _eval_aggregate_stage2(
             duration_termination=True,
             open_loop=False,
             max_steps=300,
-            no_video=True,
+            no_video=False,
+            output_dir="/experiments/final_experiments/pusht/termination_study/stage2/debug_videos/duration_baseline",
         )
 
     print(f"Spawned {len(calls) + (1 if baseline_call else 0)} rollout jobs. Collecting results...")
@@ -231,20 +280,32 @@ def _eval_aggregate_stage2(
 @app.local_entrypoint()
 def main(
     n_action_steps: int = 8,
-    bottleneck_best_dir: str = "/experiments/final_experiments/pusht/termination_study/stage1/bottleneck_expert",
-    bottleneck_best_config: str = "configs/pusht/exp_term_bottleneck_expert.yaml",
     duration_baseline_ckpt: str | None = None,
+    download_only: bool = False,
 ) -> None:
     vol = modal.Volume.from_name(MODAL_VOLUME_NAME)
-    eval_epochs = [50, 100]
 
     existing = _load_existing(vol)
+
+    if download_only:
+        _print_summary(existing.get("results", {}), existing.get("duration_termination_baseline"))
+        _download_from_volume(vol)
+        _download_worst_videos(vol, existing.get("results", {}))
+        _run_plot(OUTPUT_PATH)
+        return
+
+    eval_epochs = [50, 100]
     already_done = _already_evaluated(existing)
 
     stage2_runs = dict(STAGE2_CONFIGS)
     stage2_runs["bottleneck_best"] = {
-        "low_dir": bottleneck_best_dir,
-        "config": bottleneck_best_config,
+        "low_dir": BOTTLENECK_BEST_DIR,
+        "config": BOTTLENECK_BEST_CONFIG,
+        "duration_termination": False,
+    }
+    stage2_runs["obs_best"] = {
+        "low_dir": OBS_BEST_DIR,
+        "config": OBS_BEST_CONFIG,
         "duration_termination": False,
     }
 
@@ -267,7 +328,7 @@ def main(
     if duration_baseline_ckpt and existing.get("duration_termination_baseline") is None:
         baseline_item = {
             "ckpt_path": duration_baseline_ckpt,
-            "config": "configs/pusht/exp_k5_no_beta.yaml",
+            "config": "configs/pusht/exp_k9_no_beta.yaml",
         }
     elif duration_baseline_ckpt:
         print("duration_termination baseline: already evaluated, skipping")
@@ -276,6 +337,7 @@ def main(
         print("\nNo new checkpoints to evaluate.")
         _print_summary(existing.get("results", {}), existing.get("duration_termination_baseline"))
         _download_from_volume(vol)
+        _download_worst_videos(vol, existing.get("results", {}))
         _run_plot(OUTPUT_PATH)
         return
 
@@ -287,4 +349,5 @@ def main(
 
     _print_summary(result["results"], result.get("duration_termination_baseline"))
     _download_from_volume(vol)
+    _download_worst_videos(vol, result["results"])
     _run_plot(OUTPUT_PATH)

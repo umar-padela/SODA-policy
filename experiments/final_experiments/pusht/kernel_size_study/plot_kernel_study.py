@@ -89,7 +89,8 @@ def main() -> None:
     plot_eval_curve(
         runs_t300,
         output_dir / "plot_kernel_vs_epoch_t300.png",
-        ylabel="Mean Max Overlap (%, t≤300)",
+        ylabel="Mean Max Overlap (%, t≤300, 50ep)",
+        ylim=(88, 100),
     )
 
     # t=250, t=200, t=150: use mean_score@{t} from raw dicts
@@ -102,7 +103,8 @@ def main() -> None:
             output_dir / f"plot_kernel_vs_epoch_t{t}.png",
             score_key=f"mean_score@{t}",
             std_key=f"std_score@{t}",
-            ylabel=f"Mean Max Overlap (%, t≤{t})",
+            ylabel=f"Mean Max Overlap (%, t≤{t}, 50ep)",
+            ylim=(88, 100),
         )
 
     # --- Subplot grid: all horizons from t=100 to t=300 ---
@@ -112,7 +114,8 @@ def main() -> None:
             raw_kernels,
             output_dir / "plot_kernel_vs_epoch_grid.png",
             steps=grid_steps,
-            ncols=4,  # 8 steps → 2×4 grid
+            ncols=4,  # 8 steps -> 2x4 grid
+            ylim=(88, 100),
         )
     else:
         print("  Skipping grid: no step-level data available yet (run eval first)")
@@ -122,7 +125,7 @@ def main() -> None:
     plot_bar_comparison(
         best_per_kernel,
         output_dir / "plot_kernel_best.png",
-        ylabel="Mean Max Overlap (%, t≤300)",
+        ylabel="Mean Max Overlap (%, t≤300, 50ep)",
     )
 
     print_results_table(runs_t300)

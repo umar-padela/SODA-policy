@@ -24,11 +24,17 @@ modal run --detach \
 
 ### Step 2: Epoch sweep eval for all three kernels (n_action_steps=8 fixed)
 ```bash
-modal run \
+# Run evals (incremental — safe to re-run)
+modal run --detach \
   experiments/final_experiments/pusht/kernel_size_study/modal_eval_kernel_sweep.py
+
+# Download latest results + worst-5 videos + regenerate plots without triggering new evals
+modal run \
+  experiments/final_experiments/pusht/kernel_size_study/modal_eval_kernel_sweep.py \
+  --download-only
 ```
 
-### Step 3: Plot and choose best kernel
+### Step 3: Plot and choose best kernel (local only, no Modal needed)
 ```bash
 python experiments/final_experiments/pusht/kernel_size_study/plot_kernel_study.py \
   --data experiments/final_experiments/pusht/kernel_size_study/kernel_sweep_results.json
@@ -36,20 +42,20 @@ python experiments/final_experiments/pusht/kernel_size_study/plot_kernel_study.p
 
 ## Outputs
 
-**Modal Volume:**
-```
-/experiments/final_experiments/pusht/kernel_size_study/
-  k5/                            ← k=5 checkpoints
-  k7/                            ← k=7 checkpoints
-  k9/                            ← k=9 checkpoints
-```
+**Modal Volume** and **local mirror** use the same folder name (`kernel_size_study/`) — no path mapping needed.
 
-**Local:**
 ```
-experiments/final_experiments/pusht/kernel_size_study/
-  kernel_sweep_results.json
-  plot_kernel_vs_epoch.png       ← line plot: mean_score vs epoch, 3 curves
-  plot_kernel_best.png           ← bar chart: best epoch per kernel
+kernel_size_study/
+  k5/                            ← k=5 checkpoints (volume only)
+  k7/
+  k9/
+  debug_videos/                  ← worst-5 failure videos per (kernel, epoch); < 20% overlap only
+    k5/epoch_0050/
+    k7/epoch_0050/
+    ...
+  kernel_sweep_results.json      ← authoritative results (volume) / local mirror
+  plot_kernel_vs_epoch_*.png     ← generated locally from the JSON
+  plot_kernel_best.png
 ```
 
 ## Decision

@@ -243,3 +243,6 @@ pushT_options_labeled/
 # IDE and Assistant configs
 .cursor/
 CLAUDE.md
+
+# Daily session plan files
+[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9].md

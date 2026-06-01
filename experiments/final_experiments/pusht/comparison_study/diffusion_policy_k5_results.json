@@ -1,0 +1,210 @@
+{
+  "Diffusion Policy (CNN)": [
+    {
+      "epoch": 0,
+      "checkpoint": "",
+      "n_action_steps": 8,
+      "duration_termination": true,
+      "n_episodes": 1,
+      "mean_score": 18.15861787114237,
+      "std_score": 0.0,
+      "per_episode_scores": [
+        18.15861787114237
+      ],
+      "run_label": "Diffusion Policy (CNN)",
+      "n_action_steps_label": ""
+    },
+    {
+      "epoch": 50,
+      "checkpoint": "",
+      "n_action_steps": 8,
+      "duration_termination": true,
+      "n_episodes": 1,
+      "mean_score": 67.52136473718929,
+      "std_score": 0.0,
+      "per_episode_scores": [
+        67.52136473718929
+      ],
+      "run_label": "Diffusion Policy (CNN)",
+      "n_action_steps_label": ""
+    },
+    {
+      "epoch": 100,
+      "checkpoint": "",
+      "n_action_steps": 8,
+      "duration_termination": true,
+      "n_episodes": 1,
+      "mean_score": 76.96419849133041,
+      "std_score": 0.0,
+      "per_episode_scores": [
+        76.96419849133041
+      ],
+      "run_label": "Diffusion Policy (CNN)",
+      "n_action_steps_label": ""
+    },
+    {
+      "epoch": 150,
+      "checkpoint": "",
+      "n_action_steps": 8,
+      "duration_termination": true,
+      "n_episodes": 1,
+      "mean_score": 78.74103968290557,
+      "std_score": 0.0,
+      "per_episode_scores": [
+        78.74103968290557
+      ],
+      "run_label": "Diffusion Policy (CNN)",
+      "n_action_steps_label": ""
+    },
+    {
+      "epoch": 200,
+      "checkpoint": "",
+      "n_action_steps": 8,
+      "duration_termination": true,
+      "n_episodes": 1,
+      "mean_score": 80.42887438610747,
+      "std_score": 0.0,
+      "per_episode_scores": [
+        80.42887438610747
+      ],
+      "run_label": "Diffusion Policy (CNN)",
+      "n_action_steps_label": ""
+    },
+    {
+      "epoch": 250,
+      "checkpoint": "",
+      "n_action_steps": 8,
+      "duration_termination": true,
+      "n_episodes": 1,
+      "mean_score": 83.8939135901502,
+      "std_score": 0.0,
+      "per_episode_scores": [
+        83.8939135901502
+      ],
+      "run_label": "Diffusion Policy (CNN)",
+      "n_action_steps_label": ""
+    },
+    {
+      "epoch": 300,
+      "checkpoint": "",
+      "n_action_steps": 8,
+      "duration_termination": true,
+      "n_episodes": 1,
+      "mean_score": 90.01179621471672,
+      "std_score": 0.0,
+      "per_episode_scores": [
+        90.01179621471672
+      ],
+      "run_label": "Diffusion Policy (CNN)",
+      "n_action_steps_label": ""
+    },
+    {
+      "epoch": 350,
+      "checkpoint": "",
+      "n_action_steps": 8,
+      "duration_termination": true,
+      "n_episodes": 1,
+      "mean_score": 78.73931025214412,
+      "std_score": 0.0,
+      "per_episode_scores": [
+        78.73931025214412
+      ],
+      "run_label": "Diffusion Policy (CNN)",
+      "n_action_steps_label": ""
+    },
+    {
+      "epoch": 400,
+      "checkpoint": "",
+      "n_action_steps": 8,
+      "duration_termination": true,
+      "n_episodes": 1,
+      "mean_score": 89.0046898635455,
+      "std_score": 0.0,
+      "per_episode_scores": [
+        89.0046898635455
+      ],
+      "run_label": "Diffusion Policy (CNN)",
+      "n_action_steps_label": ""
+    },
+    {
+      "epoch": 450,
+      "checkpoint": "",
+      "n_action_steps": 8,
+      "duration_termination": true,
+      "n_episodes": 1,
+      "mean_score": 87.34791266328237,
+      "std_score": 0.0,
+      "per_episode_scores": [
+        87.34791266328237
+      ],
+      "run_label": "Diffusion Policy (CNN)",
+      "n_action_steps_label": ""
+    },
+    {
+      "epoch": 500,
+      "checkpoint": "",
+      "n_action_steps": 8,
+      "duration_termination": true,
+      "n_episodes": 1,
+      "mean_score": 88.35836184400559,
+      "std_score": 0.0,
+      "per_episode_scores": [
+        88.35836184400559
+      ],
+      "run_label": "Diffusion Policy (CNN)",
+      "n_action_steps_label": ""
+    }
+  ],
+  "best_per_episode_scores": [
+    0.0,
+    39.47703127930273,
+    47.26126851917592,
+    53.254826696350385,
+    57.3961825639056,
+    61.82313931325596,
+    65.90071716044743,
+    68.90525377447689,
+    71.11476072841371,
+    72.26482270359006,
+    92.87935048755347,
+    94.54556820336305,
+    94.6231583604783,
+    95.1990845987713,
+    95.59751493325206,
+    96.83245053668333,
+    97.43112762325913,
+    98.9913014131769,
+    99.17100243130297,
+    99.18892783832844,
+    99.25747832204172,
+    99.47484324870702,
+    100.0,
+    100.0,
+    100.0,
+    100.0,
+    100.0,
+    100.0,
+    100.0,
+    100.0,
+    100.0,
+    100.0,
+    100.0,
+    100.0,
+    100.0,
+    100.0,
+    100.0,
+    100.0,
+    100.0,
+    100.0,
+    100.0,
+    100.0,
+    100.0,
+    100.0,
+    100.0,
+    100.0,
+    100.0,
+    100.0,
+    100.0,
+    100.0
+  ]
+}

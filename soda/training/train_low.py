@@ -125,7 +125,6 @@ __all__ = [
     "LowPolicyConfig",
     "TerminationHeadConfig",
     "TrainLowConfig",
-    "PhaseConfig",
     "build_datasets",
     "build_dataloaders",
     "build_policy_and_optimizer",
@@ -138,33 +137,8 @@ __all__ = [
 
 
 @dataclass
-class PhaseConfig:
-    """Per-phase training parameters.
-
-    All fields are required — there are no hidden code defaults.  Every field
-    must be explicitly set in the YAML phase block.  Optional fields (``beta_lr``,
-    ``checkpoint``) must be written as ``null`` when not used.
-    """
-
-    num_epochs: int
-    lr: float
-    lr_warmup_epochs: int
-    termination_loss_weight: float       # λ: scale on β BCE loss (0.0 = diffusion only)
-    termination_pos_weight: float | None # γ: BCE pos_weight; None → auto from data
-    mask_diffusion_on_positive: bool
-    all_anchors: bool
-    best_checkpoint_metric: str      # e.g. "loss_diffusion" or "loss_termination"
-    beta_lr: float | None            # null = same as lr
-    warmstart_unet: bool | None      # null/true = full DP warmstart; false = obs_encoder only
-    checkpoint: str | None           # null = auto (phase1 best.ckpt for phase2)
-    lr_plateau_min_lr: float | None  # ReduceLROnPlateau floor; null when lr_schedule_type=cosine
-    skip_diffusion_loss: bool        # skip noisy U-Net forward+backward; use when backbone lr=0
-    termination_stop_grad: bool      # detach β features from backbone in this phase
-
-
-@dataclass
 class TrainLowConfig:
-    # --- Shared infra (set at train_low top level in YAML) ---
+    # --- Shared infra ---
     device: str
     seed: int
     batch_size: int
@@ -176,50 +150,44 @@ class TrainLowConfig:
     wandb_run_name: str | None       # null = auto
     wandb_group: str | None          # null = no group
     wandb_tags: tuple[str, ...]
-    finetune_dp_checkpoint: str | None  # null = no warmstart
+    finetune_dp_checkpoint: str | None  # null = no warmstart from Columbia DP checkpoint
     num_workers: int
     option_balance: str              # "none" | "inverse_freq"
     use_ema: bool
-    lr_schedule_type: str            # "cosine" | "plateau"
-    lr_plateau_patience: int | None  # null when lr_schedule_type=cosine
+    lr_schedule_type: str            # "constant" | "cosine" | "plateau"
+    lr_plateau_patience: int | None
     lr_plateau_patience_beta: int | None  # null = same as lr_plateau_patience
-    lr_plateau_factor: float | None  # null when lr_schedule_type=cosine
-    lr_plateau_min_lr: float | None  # null when lr_schedule_type=cosine
-    beta_stratified_batches: bool    # legacy single-phase option; false in all_anchors mode
-    run_readme: str | None           # null = no readme
-    two_phase: bool                  # required; true or false
-    train_phases: str                # "both" | "phase1" | "phase2" (override; both = normal)
-    phase1: PhaseConfig              # always required
-    phase2: PhaseConfig | None       # required when two_phase=true; null when two_phase=false
-
-    # --- Derived from phase1 (single-phase code path compatibility) ---
-    # These mirror phase1 values.  In two_phase mode _run_two_phase reads directly
-    # from p1/p2, so these fields are not used there.
+    lr_plateau_factor: float | None
+    lr_plateau_min_lr: float | None
+    beta_stratified_batches: bool
+    run_readme: str | None
+    # --- Training params ---
     num_epochs: int
     lr: float
     lr_warmup_epochs: int
-    beta_lr: float | None
-    warmstart_unet: bool | None
+    beta_lr: float | None            # null = same as lr
+    warmstart_unet: bool | None      # null/true = full DP warmstart; false = obs_encoder only
     mask_diffusion_on_positive: bool
-    best_checkpoint_metric: str
+    best_checkpoint_metric: str      # "loss_diffusion" | "loss_termination"
     all_anchors: bool
-    termination_loss_weight: float
-    termination_pos_weight: float | None  # None → auto from data
+    termination_loss_weight: float   # λ: scale on β BCE loss
+    termination_pos_weight: float | None  # γ: BCE pos_weight; None → auto from data
+    skip_diffusion_loss: bool        # skip noisy U-Net forward; backbone lr is set to 0 when true
+    termination_stop_grad: bool      # detach β features from backbone
+    checkpoint: str | None           # SODA warmstart checkpoint (null = start fresh)
 
     @classmethod
     def from_hydra(cls, cfg: Any) -> TrainLowConfig:
         block = _get_block(cfg, "train_low")
 
-        # two_phase is required — no silent default.
-        two_phase_raw = _cfg_require(block, "two_phase", "train_low")
-        two_phase = bool(two_phase_raw)
-
-        # Phase params are read from the flat block (scalar or [p1, p2] list).
-        phase1, phase2 = _parse_phase_configs_from_flat(block, two_phase)
-
-        # lr_plateau_patience_beta: null = same as lr_plateau_patience (explicitly allowed).
         _plat_beta_raw = _cfg_require(block, "lr_plateau_patience_beta", "train_low")
         plat_beta = int(_plat_beta_raw) if _plat_beta_raw is not None else None
+
+        def _opt_float(v: Any) -> float | None:
+            return None if v is None else float(v)
+
+        def _opt_bool(v: Any) -> bool | None:
+            return None if v is None else bool(v)
 
         return cls(
             device=str(_cfg_require(block, "device", "train_low")),
@@ -240,25 +208,23 @@ class TrainLowConfig:
             lr_schedule_type=str(_cfg_require(block, "lr_schedule_type", "train_low")),
             lr_plateau_patience=(lambda v: int(v) if v is not None else None)(_cfg_require(block, "lr_plateau_patience", "train_low")),
             lr_plateau_patience_beta=plat_beta,
-            lr_plateau_factor=(lambda v: float(v) if v is not None else None)(_cfg_require(block, "lr_plateau_factor", "train_low")),
-            lr_plateau_min_lr=(lambda v: float(v) if v is not None else None)(_extract_phase_value(block, "lr_plateau_min_lr", 0, "train_low", two_phase=two_phase)),
+            lr_plateau_factor=_opt_float(_cfg_require(block, "lr_plateau_factor", "train_low")),
+            lr_plateau_min_lr=_opt_float(_cfg_require(block, "lr_plateau_min_lr", "train_low")),
             beta_stratified_batches=bool(_cfg_require(block, "beta_stratified_batches", "train_low")),
             run_readme=_cfg_get(block, "run_readme", None),
-            two_phase=two_phase,
-            train_phases=str(_cfg_get(block, "train_phases", "both")),
-            phase1=phase1,
-            phase2=phase2,
-            # Derived from phase1 for single-phase code compatibility:
-            num_epochs=phase1.num_epochs,
-            lr=phase1.lr,
-            lr_warmup_epochs=phase1.lr_warmup_epochs,
-            beta_lr=phase1.beta_lr,
-            warmstart_unet=phase1.warmstart_unet,
-            mask_diffusion_on_positive=phase1.mask_diffusion_on_positive,
-            best_checkpoint_metric=phase1.best_checkpoint_metric,
-            all_anchors=phase1.all_anchors,
-            termination_loss_weight=phase1.termination_loss_weight,
-            termination_pos_weight=phase1.termination_pos_weight,
+            num_epochs=int(_cfg_require(block, "num_epochs", "train_low")),
+            lr=float(_cfg_require(block, "lr", "train_low")),
+            lr_warmup_epochs=int(_cfg_get(block, "lr_warmup_epochs", 0)),
+            beta_lr=_opt_float(_cfg_get(block, "beta_lr", None)),
+            warmstart_unet=_opt_bool(_cfg_get(block, "warmstart_unet", None)),
+            mask_diffusion_on_positive=bool(_cfg_require(block, "mask_diffusion_on_positive", "train_low")),
+            best_checkpoint_metric=str(_cfg_require(block, "best_checkpoint_metric", "train_low")),
+            all_anchors=bool(_cfg_require(block, "all_anchors", "train_low")),
+            termination_loss_weight=float(_cfg_require(block, "termination_loss_weight", "train_low")),
+            termination_pos_weight=_opt_float(_cfg_require(block, "termination_pos_weight", "train_low")),
+            skip_diffusion_loss=bool(_cfg_require(block, "skip_diffusion_loss", "train_low")),
+            termination_stop_grad=bool(_cfg_require(block, "termination_stop_grad", "train_low")),
+            checkpoint=(lambda v: str(v) if v is not None else None)(_cfg_get(block, "checkpoint", None)),
         )
 
 
@@ -308,105 +274,6 @@ def _parse_wandb_tags(raw: Any) -> tuple[str, ...]:
     return tuple(str(part) for part in raw)
 
 
-def _extract_phase_value(
-    block: Any,
-    key: str,
-    phase_idx: int,
-    context: str,
-    *,
-    two_phase: bool,
-) -> Any:
-    """Extract a per-phase value from a flat config block.
-
-    - Scalar value  → same value for every phase.
-    - ``[v1, v2]``  → ``v1`` for phase 1 (index 0), ``v2`` for phase 2 (index 1).
-      A list is only valid when ``two_phase=True``; raises otherwise.
-    """
-    val = _cfg_require(block, key, context)
-    try:
-        from omegaconf import ListConfig
-
-        if isinstance(val, ListConfig):
-            val = list(val)
-    except ImportError:
-        pass
-    if isinstance(val, (list, tuple)):
-        if len(val) != 2:
-            raise ValueError(
-                f"'{context}.{key}' is a list with {len(val)} element(s); "
-                f"expected exactly 2: [phase1_value, phase2_value]."
-            )
-        if not two_phase:
-            raise ValueError(
-                f"'{context}.{key}' is a list [v1, v2] but two_phase=false. "
-                f"Use a scalar value for single-phase training."
-            )
-        return val[phase_idx]
-    return val
-
-
-def _parse_phase_configs_from_flat(
-    block: Any,
-    two_phase: bool,
-) -> tuple[PhaseConfig, PhaseConfig | None]:
-    """Build :class:`PhaseConfig` objects from a flat ``train_low`` YAML block.
-
-    Phase-specific params are written inline:
-
-    - Scalar → same value for both phases (or the only phase when ``two_phase=false``).
-    - ``[p1_val, p2_val]`` → different values per phase (only valid when ``two_phase=true``).
-
-    The ``checkpoint`` key is phase-2-only (which saved checkpoint to load at the start
-    of phase 2; null = auto-load phase1/best.ckpt).  Phase 1 always starts from
-    ``finetune_dp_checkpoint`` and ignores ``checkpoint``.
-    """
-    def pv(key: str, idx: int) -> Any:
-        return _extract_phase_value(block, key, idx, "train_low", two_phase=two_phase)
-
-    def _opt_bool(v: Any) -> bool | None:
-        return None if v is None else bool(v)
-
-    def _opt_float_pw(v: Any) -> float | None:
-        return None if v is None else float(v)
-
-    phase1 = PhaseConfig(
-        num_epochs=int(pv("num_epochs", 0)),
-        lr=float(pv("lr", 0)),
-        lr_warmup_epochs=int(pv("lr_warmup_epochs", 0)),
-        termination_loss_weight=float(pv("termination_loss_weight", 0)),
-        termination_pos_weight=_opt_float_pw(pv("termination_pos_weight", 0)),
-        mask_diffusion_on_positive=bool(pv("mask_diffusion_on_positive", 0)),
-        all_anchors=bool(pv("all_anchors", 0)),
-        best_checkpoint_metric=str(pv("best_checkpoint_metric", 0)),
-        beta_lr=(lambda v: float(v) if v is not None else None)(pv("beta_lr", 0)),
-        warmstart_unet=_opt_bool(pv("warmstart_unet", 0)),
-        checkpoint=None,  # phase1 always starts from finetune_dp_checkpoint
-        lr_plateau_min_lr=(lambda v: float(v) if v is not None else None)(pv("lr_plateau_min_lr", 0)),
-        skip_diffusion_loss=bool(pv("skip_diffusion_loss", 0)),
-        termination_stop_grad=bool(pv("termination_stop_grad", 0)),
-    )
-
-    if not two_phase:
-        return phase1, None
-
-    checkpoint_raw = _cfg_require(block, "checkpoint", "train_low")
-    phase2 = PhaseConfig(
-        num_epochs=int(pv("num_epochs", 1)),
-        lr=float(pv("lr", 1)),
-        lr_warmup_epochs=int(pv("lr_warmup_epochs", 1)),
-        termination_loss_weight=float(pv("termination_loss_weight", 1)),
-        termination_pos_weight=_opt_float_pw(pv("termination_pos_weight", 1)),
-        mask_diffusion_on_positive=bool(pv("mask_diffusion_on_positive", 1)),
-        all_anchors=bool(pv("all_anchors", 1)),
-        best_checkpoint_metric=str(pv("best_checkpoint_metric", 1)),
-        beta_lr=(lambda v: float(v) if v is not None else None)(pv("beta_lr", 1)),
-        warmstart_unet=_opt_bool(pv("warmstart_unet", 1)),
-        checkpoint=str(checkpoint_raw) if checkpoint_raw is not None else None,
-        lr_plateau_min_lr=(lambda v: float(v) if v is not None else None)(pv("lr_plateau_min_lr", 1)),
-        skip_diffusion_loss=bool(pv("skip_diffusion_loss", 1)),
-        termination_stop_grad=bool(pv("termination_stop_grad", 1)),
-    )
-    return phase1, phase2
 
 
 def _init_wandb_run(train_cfg: TrainLowConfig, cfg: Any, out_dir: Path) -> Any:
@@ -805,118 +672,19 @@ def build_policy_and_optimizer(
     backbone_params = [p for n, p in policy.named_parameters() if "termination_head" not in n]
     beta_params = [p for n, p in policy.named_parameters() if "termination_head" in n]
     beta_lr = train_cfg.beta_lr if train_cfg.beta_lr is not None else train_cfg.lr
+    # When skip_diffusion_loss=True the backbone receives no gradients; set lr=0 so
+    # AdamW weight decay also does not nudge frozen weights.
+    backbone_lr = 0.0 if train_cfg.skip_diffusion_loss else train_cfg.lr
 
     _adamw_kwargs: dict = {"betas": (0.95, 0.999), "eps": 1e-8, "weight_decay": train_cfg.weight_decay}
-    optimizer_backbone = torch.optim.AdamW(backbone_params, lr=train_cfg.lr, **_adamw_kwargs)
+    optimizer_backbone = torch.optim.AdamW(backbone_params, lr=backbone_lr, **_adamw_kwargs)
     optimizer_beta = torch.optim.AdamW(beta_params, lr=beta_lr, **_adamw_kwargs)
 
     n_backbone = sum(p.numel() for p in backbone_params)
     n_beta = sum(p.numel() for p in beta_params)
-    print(f"Optimizers: backbone {n_backbone:,} params (lr={train_cfg.lr}), β head {n_beta:,} params (lr={beta_lr})")
+    print(f"Optimizers: backbone {n_backbone:,} params (lr={backbone_lr}), β head {n_beta:,} params (lr={beta_lr})")
 
     return policy, optimizer_backbone, optimizer_beta
-
-
-def _build_phase_optimizers(
-    policy: Any,
-    lr: float,
-    beta_lr: float | None,
-    weight_decay: float,
-) -> tuple[torch.optim.Optimizer, torch.optim.Optimizer]:
-    """Build fresh AdamW optimizers for a training phase (policy already constructed)."""
-    backbone_params = [p for n, p in policy.named_parameters() if "termination_head" not in n]
-    beta_params = [p for n, p in policy.named_parameters() if "termination_head" in n]
-    effective_beta_lr = beta_lr if beta_lr is not None else lr
-    kwargs: dict = {"betas": (0.95, 0.999), "eps": 1e-8, "weight_decay": weight_decay}
-    opt_bb = torch.optim.AdamW(backbone_params, lr=lr, **kwargs)
-    opt_beta = torch.optim.AdamW(beta_params, lr=effective_beta_lr, **kwargs)
-    print(
-        f"Optimizers: backbone {sum(p.numel() for p in backbone_params):,} params (lr={lr}), "
-        f"β head {sum(p.numel() for p in beta_params):,} params (lr={effective_beta_lr})"
-    )
-    return opt_bb, opt_beta
-
-
-def _build_lr_schedulers(
-    optimizer_backbone: torch.optim.Optimizer,
-    optimizer_beta: torch.optim.Optimizer,
-    train_cfg: "TrainLowConfig",
-    num_epochs: int,
-    lr_warmup_epochs: int,
-    lr_plateau_min_lr: float | None = None,
-) -> tuple[Any, Any, Any | None, Any | None, int]:
-    """Build LR schedulers for one phase. Returns (lr_sched, lr_sched_beta, plateau_bb, plateau_beta, warmup_epochs)."""
-    warmup_epochs = min(lr_warmup_epochs, num_epochs)
-    plateau_scheduler_backbone = None
-    plateau_scheduler_beta = None
-    _min_lr = lr_plateau_min_lr if lr_plateau_min_lr is not None else train_cfg.lr_plateau_min_lr
-
-    def _make_warmup(opt: torch.optim.Optimizer) -> Any:
-        if warmup_epochs > 0:
-            return torch.optim.lr_scheduler.LinearLR(
-                opt, start_factor=1e-6, end_factor=1.0, total_iters=warmup_epochs
-            )
-        return torch.optim.lr_scheduler.LambdaLR(opt, lr_lambda=lambda _: 1.0)
-
-    # NOTE: SequentialLR has a bug in PyTorch ≤1.12 where sub-schedulers call step() in
-    # __init__, corrupting the optimizer LR on transition. All schedule types use a single
-    # LambdaLR to avoid this — warmup + decay logic is encoded in the lambda directly.
-
-    def _make_lambda_scheduler(opt: torch.optim.Optimizer, fn) -> Any:
-        return torch.optim.lr_scheduler.LambdaLR(opt, lr_lambda=fn)
-
-    if train_cfg.lr_schedule_type == "plateau":
-        # Plateau: linear warmup handled by LambdaLR; ReduceLROnPlateau takes over after.
-        # The epoch loop calls lr_scheduler.step() only for epoch <= warmup_epochs, then
-        # plateau_scheduler.step(val_loss) for the rest — so LambdaLR just needs to ramp.
-        wu = warmup_epochs
-        def _warmup_fn(ep: int) -> float:
-            if wu <= 0 or ep >= wu:
-                return 1.0
-            return max(1e-6, ep / wu)
-        lr_scheduler = _make_lambda_scheduler(optimizer_backbone, _warmup_fn)
-        lr_scheduler_beta = _make_lambda_scheduler(optimizer_beta, _warmup_fn)
-        _plateau_base = {
-            "mode": "min",
-            "factor": train_cfg.lr_plateau_factor,
-            "min_lr": _min_lr,
-        }
-        beta_patience = (
-            train_cfg.lr_plateau_patience_beta
-            if train_cfg.lr_plateau_patience_beta is not None
-            else train_cfg.lr_plateau_patience
-        )
-        plateau_scheduler_backbone = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer_backbone, patience=train_cfg.lr_plateau_patience, **_plateau_base
-        )
-        plateau_scheduler_beta = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer_beta, patience=beta_patience, **_plateau_base
-        )
-    elif train_cfg.lr_schedule_type == "constant":
-        # Linear warmup [0 → lr] over warmup_epochs, then constant lr forever.
-        # LambdaLR.__init__ calls step() once → last_epoch=0, so epoch k is logged at lambda(k-1).
-        wu = warmup_epochs
-        def _const_fn(ep: int) -> float:
-            if wu <= 0 or ep >= wu:
-                return 1.0
-            return max(1e-6, ep / wu)
-        lr_scheduler = _make_lambda_scheduler(optimizer_backbone, _const_fn)
-        lr_scheduler_beta = _make_lambda_scheduler(optimizer_beta, _const_fn)
-    else:
-        # Cosine: linear warmup then cosine anneal to 0.
-        import math
-        cosine_epochs = max(1, num_epochs - warmup_epochs)
-        wu = warmup_epochs
-        T_cos = cosine_epochs
-        def _cosine_fn(ep: int) -> float:
-            if ep < wu:
-                return max(1e-6, ep / wu) if wu > 0 else 1.0
-            t = ep - wu
-            return 0.5 * (1.0 + math.cos(math.pi * min(t, T_cos) / T_cos))
-        lr_scheduler = _make_lambda_scheduler(optimizer_backbone, _cosine_fn)
-        lr_scheduler_beta = _make_lambda_scheduler(optimizer_beta, _cosine_fn)
-
-    return lr_scheduler, lr_scheduler_beta, plateau_scheduler_backbone, plateau_scheduler_beta, warmup_epochs
 
 
 def _build_ema(policy: Any, train_cfg: "TrainLowConfig") -> tuple[Any | None, Any | None]:
@@ -1412,212 +1180,6 @@ def _run_epoch_loop(
     return history, best_val
 
 
-def _run_two_phase(cfg: Any, train_cfg: "TrainLowConfig", out_dir: "Path", run_archive: Any, *, ddp_rank: int = 0) -> None:
-    """Orchestrate two-phase training: phase 1 (diffusion), phase 2 (β head).
-
-    Checkpoint layout (flat — no subdirs)::
-
-        out_dir/
-          best_p1.ckpt              ← best diffusion val loss (phase 1)
-          best.ckpt                 ← best β val metric (phase 2)
-          epoch_0010.ckpt           ← periodic checkpoints with global epoch numbers
-          epoch_0150.ckpt           ← last phase 1 checkpoint
-          epoch_0200.ckpt           ← phase 2 checkpoints continue numbering from 151
-          epoch_0500.ckpt
-          latest.ckpt               ← phase 2 final state
-          metrics.json              ← combined history (both phases)
-    """
-    from soda.training.checkpoint_utils import build_lr_schedule_meta, write_metrics_history
-
-    p1, p2 = train_cfg.phase1, train_cfg.phase2
-    assert p1 is not None and p2 is not None, "two_phase=True requires phase1 and phase2 configs"
-
-    run_p1 = train_cfg.train_phases in ("both", "phase1")
-    run_p2 = train_cfg.train_phases in ("both", "phase2")
-    assert run_p1 or run_p2, f"train_phases={train_cfg.train_phases!r} must be 'both', 'phase1', or 'phase2'"
-
-    all_anchors = p1.all_anchors if run_p1 else p2.all_anchors
-    train_ds, val_ds = build_datasets(cfg, all_anchors=all_anchors)
-    class_weights = _resolve_option_class_weights(cfg, train_ds)
-
-    # Build policy using phase1 initial values; both will be overridden before training starts.
-    policy, _, _ = build_policy_and_optimizer(
-        cfg, train_ds, train_cfg,
-        termination_loss_weight=p1.termination_loss_weight,
-        termination_pos_weight=p1.termination_pos_weight,
-    )
-    ema_model, ema = _build_ema(policy, train_cfg)
-
-    train_loader, val_loader, tbs, vbs = build_dataloaders(
-        cfg, train_ds, val_ds, train_cfg, beta_batch_pos_fraction=None, all_anchors=all_anchors
-    )
-
-    history: list[dict] = []
-    base_name = train_cfg.wandb_run_name or "soda-low"
-    total_epochs = (p1.num_epochs if run_p1 else 0) + (p2.num_epochs if run_p2 else 0)
-
-    # ============================== PHASE 1 ==============================
-    if run_p1:
-        raw_policy = _unwrap_policy(policy)
-        raw_policy.cfg.termination_loss_weight = p1.termination_loss_weight
-        raw_policy.cfg.termination_pos_weight = p1.termination_pos_weight
-        raw_policy.cfg.termination_stop_grad = p1.termination_stop_grad
-        if ema_model is not None:
-            ema_model.cfg.termination_loss_weight = p1.termination_loss_weight
-            ema_model.cfg.termination_pos_weight = p1.termination_pos_weight
-            ema_model.cfg.termination_stop_grad = p1.termination_stop_grad
-
-        opt_bb_p1, opt_beta_p1 = _build_phase_optimizers(raw_policy, p1.lr, p1.beta_lr, train_cfg.weight_decay)
-        lr_s_p1, lr_s_beta_p1, plat_bb_p1, plat_beta_p1, warmup_p1 = _build_lr_schedulers(
-            opt_bb_p1, opt_beta_p1, train_cfg, p1.num_epochs, p1.lr_warmup_epochs,
-            lr_plateau_min_lr=p1.lr_plateau_min_lr,
-        )
-        cosine_p1 = max(1, p1.num_epochs - warmup_p1)
-        lr_meta_p1 = build_lr_schedule_meta(train_cfg, warmup_epochs=warmup_p1, cosine_epochs=cosine_p1)
-
-        wandb_run_p1 = None
-        if train_cfg.wandb_enabled and ddp_rank == 0:
-            p1_cfg_patch = copy.copy(train_cfg)
-            p1_cfg_patch.wandb_run_name = f"{base_name}-p1"
-            wandb_run_p1 = _init_wandb_run(p1_cfg_patch, cfg, out_dir)
-
-        if ddp_rank == 0:
-            print(
-                f"\n=== Phase 1: diffusion only — {p1.num_epochs} epochs, "
-                f"lr={p1.lr}, all_anchors={p1.all_anchors}, "
-                f"termination_loss_weight={p1.termination_loss_weight} ==="
-                f"\n    checkpoints → {out_dir}"
-            )
-        history, best_val_p1 = _run_epoch_loop(
-            policy=policy,
-            train_loader=train_loader,
-            val_loader=val_loader,
-            optimizer_backbone=opt_bb_p1,
-            optimizer_beta=opt_beta_p1,
-            lr_scheduler=lr_s_p1,
-            lr_scheduler_beta=lr_s_beta_p1,
-            plateau_scheduler_backbone=plat_bb_p1,
-            plateau_scheduler_beta=plat_beta_p1,
-            train_batch_sampler=tbs,
-            val_batch_sampler=vbs,
-            ema_model=ema_model,
-            ema=ema,
-            class_weights=class_weights,
-            cfg=cfg,
-            device=train_cfg.device,
-            num_epochs=p1.num_epochs,
-            warmup_epochs=warmup_p1,
-            mask_diffusion_on_positive=p1.mask_diffusion_on_positive,
-            skip_diffusion=p1.skip_diffusion_loss,
-            best_checkpoint_metric=p1.best_checkpoint_metric,
-            checkpoint_every=train_cfg.checkpoint_every,
-            out_dir=out_dir,
-            lr_schedule_meta=lr_meta_p1,
-            wandb_run=wandb_run_p1,
-            history=history,
-            best_val=float("inf"),
-            best_checkpoint_name="best_p1.ckpt",
-            epoch_offset=0,
-            ddp_rank=ddp_rank,
-        )
-
-        if wandb_run_p1 is not None:
-            import wandb as _wandb
-
-            _wandb.finish()
-
-    # ============================== RELOAD + PHASE 2 ==============================
-    if run_p2:
-        phase1_ckpt = p2.checkpoint or str(out_dir / "best_p1.ckpt")
-        raw_p2 = _unwrap_policy(policy)
-        _reload_phase_checkpoint(raw_p2, ema_model, phase1_ckpt, train_cfg.device)
-
-        raw_p2.cfg.termination_loss_weight = p2.termination_loss_weight
-        raw_p2.cfg.termination_pos_weight = p2.termination_pos_weight
-        raw_p2.cfg.termination_stop_grad = p2.termination_stop_grad
-        if ema_model is not None:
-            ema_model.cfg.termination_loss_weight = p2.termination_loss_weight
-            ema_model.cfg.termination_pos_weight = p2.termination_pos_weight
-            ema_model.cfg.termination_stop_grad = p2.termination_stop_grad
-
-        opt_bb_p2, opt_beta_p2 = _build_phase_optimizers(raw_p2, p2.lr, p2.beta_lr, train_cfg.weight_decay)
-        lr_s_p2, lr_s_beta_p2, plat_bb_p2, plat_beta_p2, warmup_p2 = _build_lr_schedulers(
-            opt_bb_p2, opt_beta_p2, train_cfg, p2.num_epochs, p2.lr_warmup_epochs,
-            lr_plateau_min_lr=p2.lr_plateau_min_lr,
-        )
-        cosine_p2 = max(1, p2.num_epochs - warmup_p2)
-        lr_meta_p2 = build_lr_schedule_meta(train_cfg, warmup_epochs=warmup_p2, cosine_epochs=cosine_p2)
-        p2_epoch_offset = p1.num_epochs if train_cfg.two_phase else 0
-
-        wandb_run_p2 = None
-        if train_cfg.wandb_enabled and ddp_rank == 0:
-            p2_cfg_patch = copy.copy(train_cfg)
-            p2_cfg_patch.wandb_run_name = f"{base_name}-p2"
-            wandb_run_p2 = _init_wandb_run(p2_cfg_patch, cfg, out_dir)
-
-        if ddp_rank == 0:
-            print(
-                f"\n=== Phase 2: β head — {p2.num_epochs} epochs (global {p2_epoch_offset+1}–{p2_epoch_offset+p2.num_epochs}), "
-                f"lr={p2.lr}, beta_lr={p2.beta_lr}, "
-                f"termination_loss_weight={p2.termination_loss_weight}, "
-                f"termination_pos_weight={p2.termination_pos_weight} ==="
-                f"\n    checkpoints → {out_dir}"
-            )
-        history, best_val_p2 = _run_epoch_loop(
-            policy=policy,
-            train_loader=train_loader,
-            val_loader=val_loader,
-            optimizer_backbone=opt_bb_p2,
-            optimizer_beta=opt_beta_p2,
-            lr_scheduler=lr_s_p2,
-            lr_scheduler_beta=lr_s_beta_p2,
-            plateau_scheduler_backbone=plat_bb_p2,
-            plateau_scheduler_beta=plat_beta_p2,
-            train_batch_sampler=tbs,
-            val_batch_sampler=vbs,
-            ema_model=ema_model,
-            ema=ema,
-            class_weights=class_weights,
-            cfg=cfg,
-            device=train_cfg.device,
-            num_epochs=p2.num_epochs,
-            warmup_epochs=warmup_p2,
-            mask_diffusion_on_positive=p2.mask_diffusion_on_positive,
-            skip_diffusion=p2.skip_diffusion_loss,
-            best_checkpoint_metric=p2.best_checkpoint_metric,
-            checkpoint_every=train_cfg.checkpoint_every,
-            out_dir=out_dir,
-            lr_schedule_meta=lr_meta_p2,
-            wandb_run=wandb_run_p2,
-            history=history,
-            best_val=float("inf"),
-            best_checkpoint_name="best.ckpt",
-            epoch_offset=p2_epoch_offset,
-            ddp_rank=ddp_rank,
-        )
-
-        if wandb_run_p2 is not None:
-            import wandb as _wandb
-
-            _wandb.finish()
-
-        if ddp_rank == 0:
-            save_checkpoint(
-                out_dir / "latest.ckpt",
-                policy,
-                opt_bb_p2,
-                total_epochs,
-                cfg,
-                optimizer_beta=opt_beta_p2,
-                ema_policy=ema_model,
-                ema=ema,
-                metrics=history[-1] if history else {},
-            )
-
-    if ddp_rank == 0:
-        write_metrics_history(out_dir / "metrics.json", history)
-
-
 def run_training(cfg: Any) -> None:
     from omegaconf import OmegaConf
 
@@ -1629,7 +1191,6 @@ def run_training(cfg: Any) -> None:
     train_cfg = TrainLowConfig.from_hydra(cfg)
     _seed_all(train_cfg.seed)
 
-    # DDP: init process group and update device to the per-rank CUDA device.
     ddp_rank, ddp_world_size = 0, 1
     if _ddp_is_active():
         ddp_rank, ddp_world_size, local_device = _ddp_init(train_cfg.device)
@@ -1638,7 +1199,7 @@ def run_training(cfg: Any) -> None:
     out_dir = _resolve_output_dir(cfg, train_cfg)
     if ddp_rank == 0:
         out_dir.mkdir(parents=True, exist_ok=True)
-    _ddp_barrier()  # all ranks wait until rank 0 has created the output dir
+    _ddp_barrier()
 
     run_archive = None
     if ddp_rank == 0:
@@ -1652,15 +1213,7 @@ def run_training(cfg: Any) -> None:
             },
         )
 
-    if train_cfg.two_phase:
-        _run_two_phase(cfg, train_cfg, out_dir, run_archive, ddp_rank=ddp_rank)
-        if ddp_rank == 0 and run_archive is not None:
-            finalize_training_run_archive(run_archive)
-        _ddp_cleanup()
-        return
-
     train_ds, val_ds = build_datasets(cfg, all_anchors=train_cfg.all_anchors)
-    # Resolve pos_weight now that datasets are available (handles null → auto from data).
     resolved_pos_weight = _resolve_termination_pos_weight(
         cfg, train_ds, configured=train_cfg.termination_pos_weight
     )
@@ -1700,7 +1253,6 @@ def run_training(cfg: Any) -> None:
     )
     class_weights = _resolve_option_class_weights(cfg, train_ds)
 
-    # EMA — same config as Columbia upstream (inv_gamma=1, power=0.75, max=0.9999)
     ema_model = None
     ema = None
     if train_cfg.use_ema:
@@ -1718,15 +1270,21 @@ def run_training(cfg: Any) -> None:
             max_value=0.9999,
         )
 
+    # Load SODA warmstart checkpoint if specified via train_low.checkpoint.
+    if train_cfg.checkpoint:
+        _reload_phase_checkpoint(
+            _unwrap_policy(policy),
+            ema_model,
+            train_cfg.checkpoint,
+            train_cfg.device,
+        )
+
     warmup_epochs = min(train_cfg.lr_warmup_epochs, train_cfg.num_epochs)
     plateau_scheduler_backbone = None
     plateau_scheduler_beta = None
     cosine_epochs = 0
 
     if train_cfg.lr_schedule_type == "plateau":
-        # Backbone: linear warmup → ReduceLROnPlateau on val_loss_diffusion.
-        # β head:   linear warmup → ReduceLROnPlateau on val_loss_termination.
-        # Each component's LR decays only when its own loss plateaus, fully independent.
         lr_scheduler = torch.optim.lr_scheduler.LinearLR(
             optimizer_backbone, start_factor=1e-6, end_factor=1.0, total_iters=warmup_epochs
         )
@@ -1741,8 +1299,18 @@ def run_training(cfg: Any) -> None:
         plateau_scheduler_beta = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer_beta, patience=beta_patience, **_plateau_base
         )
+    elif train_cfg.lr_schedule_type == "constant":
+        # Constant LR with optional warmup. Uses LambdaLR to avoid the SequentialLR
+        # bug where sub-scheduler __init__ corrupts the optimizer LR.
+        wu = warmup_epochs
+        def _const_warmup_fn(ep: int) -> float:
+            if wu <= 0 or ep >= wu:
+                return 1.0
+            return max(1e-6, ep / wu)
+        lr_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer_backbone, lr_lambda=_const_warmup_fn)
+        lr_scheduler_beta = torch.optim.lr_scheduler.LambdaLR(optimizer_beta, lr_lambda=_const_warmup_fn)
     else:
-        # Cosine: both components share the same decay shape (tied to num_epochs).
+        # Cosine: linear warmup then cosine anneal to 0.
         cosine_epochs = max(1, train_cfg.num_epochs - warmup_epochs)
         lr_scheduler = torch.optim.lr_scheduler.SequentialLR(
             optimizer_backbone,
@@ -1781,8 +1349,8 @@ def run_training(cfg: Any) -> None:
     if train_cfg.lr_schedule_type == "plateau":
         _beta_pat = train_cfg.lr_plateau_patience_beta if train_cfg.lr_plateau_patience_beta is not None else train_cfg.lr_plateau_patience
         lr_sched_desc = (
-            f"plateau(backbone→loss_diffusion patience={train_cfg.lr_plateau_patience},"
-            f"β→loss_termination patience={_beta_pat},"
+            f"plateau(backbone->loss_diffusion patience={train_cfg.lr_plateau_patience},"
+            f"b->loss_termination patience={_beta_pat},"
             f"factor={train_cfg.lr_plateau_factor},"
             f"min_lr={train_cfg.lr_plateau_min_lr})"
         )
@@ -1826,7 +1394,7 @@ def run_training(cfg: Any) -> None:
         num_epochs=train_cfg.num_epochs,
         warmup_epochs=warmup_epochs,
         mask_diffusion_on_positive=train_cfg.mask_diffusion_on_positive,
-        skip_diffusion=False,
+        skip_diffusion=train_cfg.skip_diffusion_loss,
         best_checkpoint_metric=train_cfg.best_checkpoint_metric,
         checkpoint_every=train_cfg.checkpoint_every,
         out_dir=out_dir,
@@ -1864,7 +1432,6 @@ def run_training(cfg: Any) -> None:
 
         if wandb_run is not None:
             import wandb
-
             wandb.finish()
 
         if run_archive is not None:
@@ -1874,7 +1441,7 @@ def run_training(cfg: Any) -> None:
 
 
 def main(cfg: Any) -> None:
-    """Hydra entrypoint — called by CLI wrapper in ``__main__``."""
+    """Hydra entrypoint."""
     run_training(cfg)
 
 

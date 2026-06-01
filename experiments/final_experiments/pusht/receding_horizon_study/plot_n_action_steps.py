@@ -1,67 +1,77 @@
 """
-Plot n_action_steps sweep results — receding_horizon_study step 3.
+Plot n_action_steps sweep results — receding_horizon_study.
+
+Line plot: x = receding horizon window size, y = mean max overlap.
+open_loop is shown as a horizontal dashed reference line (no fixed x position).
+
+Output: plot_n_action_steps.png (same dir as --data)
 
 Usage:
   python experiments/final_experiments/pusht/receding_horizon_study/plot_n_action_steps.py \\
-    --data experiments/final_experiments/pusht/receding_horizon_study/n_action_steps_sweep/sweep_results.json \\
-    --output experiments/final_experiments/pusht/receding_horizon_study/n_action_steps_sweep/plot_n_action_steps.png
+    --data experiments/final_experiments/pusht/receding_horizon_study/n_action_steps_sweep/sweep_results.json
 """
 
 from __future__ import annotations
 import argparse
 import json
-import sys
 from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).parents[1] / "shared"))
-from experiment_utils import plot_bar_comparison, EvalResult  # noqa: E402
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--data", required=True, help="Path to sweep_results.json")
-    parser.add_argument(
-        "--output",
-        default=None,
-        help="Output PNG path (default: same dir as data)",
-    )
+    parser.add_argument("--output", default=None)
     args = parser.parse_args()
 
     data_path = Path(args.data)
     with open(data_path) as f:
         sweep = json.load(f)
 
-    # Build EvalResult dict for bar chart
-    results: dict[str, EvalResult] = {}
-    for label, r in sweep.items():
-        results[label] = EvalResult(
-            epoch=0,
-            checkpoint=r.get("low_checkpoint", ""),
-            n_action_steps=r.get("n_action_steps") or 0,
-            duration_termination=True,
-            n_episodes=r.get("n_episodes", 0),
-            mean_score=r["mean_score"],
-            std_score=r["std_score"],
-            per_episode_scores=r.get("per_episode_scores", []),
-            run_label=label,
-            n_action_steps_label=label,
-        )
+    import matplotlib.pyplot as plt
 
-    output_path = args.output or str(data_path.parent / "plot_n_action_steps.png")
-    plot_bar_comparison(
-        results,
-        output_path,
-        title="Push-T: n_action_steps Sweep (k=5, duration_termination)",
-        ylabel="Mean Max Overlap Score",
-    )
+    # Separate numeric n_action_steps runs from open_loop
+    numeric = {
+        int(r["n_action_steps"]): r
+        for key, r in sweep.items()
+        if r.get("n_action_steps") is not None
+    }
+    open_loop = sweep.get("open_loop")
 
-    # Print table
+    xs     = sorted(numeric.keys())
+    means  = [numeric[n]["mean_score"] for n in xs]
+    stds   = [numeric[n]["std_score"]  for n in xs]
+
+    fig, ax = plt.subplots(figsize=(7, 5))
+
+    ax.errorbar(xs, means, yerr=stds, fmt="o-", capsize=4,
+                linewidth=1.8, markersize=6, label="Duration termination")
+
+    if open_loop:
+        ax.axhline(open_loop["mean_score"], linestyle="--", linewidth=1.5,
+                   color="gray", label="Open loop")
+
+    ax.set_xlabel("Receding Horizon (n_action_steps)")
+    ax.set_ylabel("Mean Max Overlap (%, t≤300, 50ep)")
+    ax.set_xticks(xs)
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    ax.set_ylim(0, 100)
+
+    output = Path(args.output) if args.output else data_path.parent / "plot_n_action_steps.png"
+    output.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output, dpi=150, bbox_inches="tight")
+    print(f"Saved plot -> {output}")
+    plt.close(fig)
+
     print("\n=== n_action_steps results ===")
-    for label, r in sorted(results.items(), key=lambda x: x[1].mean_score, reverse=True):
-        print(f"  {label:>12}: {r.mean_score:.4f} ± {r.std_score:.4f}")
+    for n in xs:
+        r = numeric[n]
+        print(f"  n={n:>3}: {r['mean_score']:.4f} ± {r['std_score']:.4f}")
+    if open_loop:
+        print(f"  open_loop: {open_loop['mean_score']:.4f} ± {open_loop['std_score']:.4f}")
 
-    best = max(results.values(), key=lambda r: r.mean_score)
-    print(f"\nRecommended n_action_steps: {best.n_action_steps_label} (mean={best.mean_score:.4f})")
+    best_n = max(xs, key=lambda n: numeric[n]["mean_score"])
+    print(f"\nBest n_action_steps: {best_n} (mean={numeric[best_n]['mean_score']:.4f})")
 
 
 if __name__ == "__main__":

@@ -30,6 +30,10 @@ import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
+from soda.dataset.option_all_frames_dataset import (
+    OptionAllFramesDataset,
+    build_option_all_frames_dataset_from_config,
+)
 from soda.dataset.option_start_dataset import (
     OptionStartDataset,
     build_option_start_dataset_from_config,
@@ -155,6 +159,7 @@ class TrainHighConfig:
     dropout_rate: float = 0.0         # MLP dropout; 0.0 = disabled
     label_smoothing: float = 0.0      # CE label smoothing; 0.0 = hard targets
     imagenet_init: bool = False       # true → ImageNet-init encoder (not Push-T fine-tuned)
+    train_on_all_frames: bool = False  # true → OptionAllFramesDataset; false → OptionStartDataset
 
     @classmethod
     def from_hydra(cls, cfg: Any) -> TrainHighConfig:
@@ -185,6 +190,7 @@ class TrainHighConfig:
             dropout_rate=float(_cfg_get(block, "dropout_rate", 0.0)),
             label_smoothing=float(_cfg_get(block, "label_smoothing", 0.0)),
             imagenet_init=bool(_cfg_get(block, "imagenet_init", False)),
+            train_on_all_frames=bool(_cfg_get(block, "train_on_all_frames", False)),
         )
 
 
@@ -265,10 +271,18 @@ def _dataset_hydra_cfg(cfg: Any, *, train: bool) -> Any:
     return merged
 
 
-def build_datasets(cfg: Any) -> tuple[OptionStartDataset, OptionStartDataset]:
-    train_ds = build_option_start_dataset_from_config(
-        _dataset_hydra_cfg(cfg, train=True)
+def build_datasets(cfg: Any) -> tuple:
+    train_on_all_frames = bool(
+        _cfg_get(_get_block(cfg, "train_high"), "train_on_all_frames", False)
     )
+    if train_on_all_frames:
+        train_ds = build_option_all_frames_dataset_from_config(
+            _dataset_hydra_cfg(cfg, train=True)
+        )
+    else:
+        train_ds = build_option_start_dataset_from_config(
+            _dataset_hydra_cfg(cfg, train=True)
+        )
     val_ds = train_ds.get_validation_dataset()
     return train_ds, val_ds
 

@@ -11,7 +11,7 @@
 n_action_steps: 8  # [eval] receding-horizon execute window before replan (h=8)
 
 checkpoint:  # [eval] frozen Columbia weights on Modal volume
-  volume_path: /experiments/dp_baselines/pusht_image_cnn_train0/latest.ckpt  # [eval] path to latest.ckpt
+  volume_path: /experiments/dp_baselines/pusht_image_cnn_train0/best.ckpt  # [eval] best validation checkpoint (use modal_download_dp.py --best to fetch)
 
 eval:  # [eval] modal_eval settings
   wandb_enabled: true  # [eval] log overlap metrics (+ videos) to W&B

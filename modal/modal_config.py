@@ -203,6 +203,7 @@ def _run(
     from soda.experiments.run_readme import INVOKE_COMMAND_ENV, RUN_README_ENV, validate_run_readme
 
     env = os.environ.copy()
+    env["HYDRA_FULL_ERROR"] = "1"
     if run_readme is not None:
         env[RUN_README_ENV] = validate_run_readme(run_readme)
     if invoke_command:
@@ -237,12 +238,12 @@ def _override_key_set(overrides: list[str]) -> set[str]:
 
 
 def _merge_hydra_overrides(
-    defaults: dict[str, str],
+    defaults: dict[str, str] | None,
     hydra_overrides: list[str] | None,
 ) -> list[str]:
     """Apply ``defaults`` unless the same Hydra key appears in ``hydra_overrides``."""
     keys = _override_key_set(hydra_overrides or [])
-    merged = [f"{key}={value}" for key, value in defaults.items() if key not in keys]
+    merged = [f"{key}={value}" for key, value in (defaults or {}).items() if key not in keys]
     if hydra_overrides:
         merged.extend(hydra_overrides)
     return merged
@@ -254,7 +255,7 @@ def _build_train_cmd(
     task: str,
     config_name: str,
     hydra_subdir: str,
-    default_overrides: dict[str, str],
+    default_overrides: dict[str, str] | None = None,
     hydra_overrides: list[str] | None = None,
     use_torchrun: bool = False,
 ) -> list[str]:
@@ -389,16 +390,27 @@ def smoke() -> dict:
 )
 def download_frozen_dp(
     dest_path: str = FROZEN_DP_PUSHT_CHECKPOINT,
+    best: bool = False,
 ) -> str:
     """
-    One-time download of Columbia frozen DP ``latest.ckpt`` onto the Volume.
+    One-time download of Columbia frozen DP checkpoint onto the Volume.
 
-    Eval does not download automatically — run this, then pass ``dest_path``
-    to ``modal_eval.py --checkpoint``.
+    best=False (default): downloads latest.ckpt (final training checkpoint).
+    best=True:            downloads best.ckpt (best validation checkpoint).
     """
-    from soda.eval.dp_frozen import ensure_dp_checkpoint
+    from soda.eval.dp_frozen import (
+        DP_PUSHT_IMAGE_TRAIN0_BEST_URL,
+        ensure_dp_checkpoint,
+    )
 
-    path = ensure_dp_checkpoint(Path(dest_path), download=True)
+    if best:
+        resolved_dest = dest_path.replace("latest.ckpt", "best.ckpt")
+        url = DP_PUSHT_IMAGE_TRAIN0_BEST_URL
+    else:
+        resolved_dest = dest_path
+        url = None
+
+    path = ensure_dp_checkpoint(Path(resolved_dest), download=True, url=url)
     volume.commit()
     print(f"Frozen DP checkpoint ready: {path}")
     return str(path)
@@ -426,6 +438,7 @@ def eval_run(
     ckpt_slug: str | None = None,
     record_video: bool = True,
     invoke_command: str | None = None,
+    output_dir: str | None = None,
 ) -> dict:
     """
     Generic Push-T eval on Modal: load yaml → roll out → overlap @ 125–300 (25-step grid).
@@ -461,7 +474,13 @@ def eval_run(
     )
     cfg = build_eval_config_from_yaml(config_path, cli=cli)
 
-    out_dir, run_ts = resolve_eval_output_dir(cfg, Path(EXPERIMENTS_MOUNT))
+    if output_dir is not None:
+        from datetime import datetime, timezone
+        out_dir = Path(EXPERIMENTS_MOUNT) / output_dir.lstrip("/").removeprefix(EXPERIMENTS_MOUNT.lstrip("/")).lstrip("/")
+        run_ts = datetime.now(timezone.utc)
+        out_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        out_dir, run_ts = resolve_eval_output_dir(cfg, Path(EXPERIMENTS_MOUNT))
     result = run_pusht_eval(
         cfg,
         out_dir,
@@ -531,7 +550,7 @@ def list_rollout_segments(
 @app.function(
     image=image,
     gpu=GPU_EVAL,
-    timeout=7200,
+    timeout=86400,
     volumes={EXPERIMENTS_MOUNT: volume},
 )
 def rollout_low_policy(
@@ -673,7 +692,7 @@ def rollout_low_policy(
 @app.function(
     image=image,
     gpu=GPU_EVAL,
-    timeout=7200,
+    timeout=86400,
     volumes={EXPERIMENTS_MOUNT: volume},
 )
 def rollout_dp_policy(
@@ -785,7 +804,7 @@ def hierarchical_rollout_dir(task: str = "pusht") -> str:
 @app.function(
     image=image,
     gpu=GPU_EVAL,
-    timeout=7200,
+    timeout=86400,
     volumes={EXPERIMENTS_MOUNT: volume},
 )
 def rollout_hierarchical(
@@ -992,31 +1011,17 @@ def run_sweep_train_high_sequential(
     secrets=[_wandb_secret],
 )
 def train_dp(
-    config_name: str = "dp",
-    task: str = "pusht",
-    hydra_overrides: list[str] | None = None,
+    hydra_overrides: list[str],
     *,
     run_readme: str,
     invoke_command: str | None = None,
 ) -> None:
     """
-    Remote wrapper around soda/training/train_dp.py (Columbia DP workspace).
-
-    Checkpoints are written to ``/experiments/train_dp/{config_name}/`` on the Volume
-    (override with ``train_dp.output_dir=...`` in ``hydra_overrides``).
+    Train vanilla DP using Columbia's pipeline (train.py) directly.
+    All config is passed as Hydra overrides — no wrapper config translation.
+    Checkpoints go to wherever hydra.run.dir points.
     """
-    overrides = _parse_hydra_overrides(hydra_overrides)
-    cmd = _build_train_cmd(
-        "soda/training/train_dp.py",
-        task=task,
-        config_name=config_name,
-        hydra_subdir="train_dp",
-        default_overrides={
-            "train_dp.output_dir": _volume_train_dp_dir(task, config_name),
-            "checkpoint.volume_path": f"{_volume_train_dp_dir(task, config_name)}/latest.ckpt",
-        },
-        hydra_overrides=overrides,
-    )
+    cmd = ["python", "soda/training/train_dp_direct.py"] + list(hydra_overrides)
     _run(cmd, run_readme=run_readme, invoke_command=invoke_command)
     volume.commit()
 
@@ -1062,6 +1067,152 @@ def train_low(
 @app.function(
     image=image,
     gpu=_GPU_TRAIN_SPEC,
+    timeout=86400,
+    volumes={EXPERIMENTS_MOUNT: volume},
+    secrets=[_wandb_secret],
+)
+def train_beta(
+    config_name: str = "obs_positive_negative_standalone",
+    task: str = "pusht",
+    hydra_overrides: list[str] | None = None,
+    *,
+    run_readme: str,
+    invoke_command: str | None = None,
+) -> None:
+    """
+    Remote wrapper around soda/training/train_beta.py (standalone β network).
+
+    Trains a fresh ResNet (ImageNet init) + option embed + MLP as a standalone
+    termination classifier, decoupled from the LowPolicy diffusion backbone.
+    Checkpoints are written to the path specified in train_beta.output_dir
+    (set via hydra_overrides or the yaml config).
+    """
+    overrides = _parse_hydra_overrides(hydra_overrides)
+    cmd = _build_train_cmd(
+        "soda/training/train_beta.py",
+        task=task,
+        config_name=config_name,
+        hydra_subdir="train_beta",
+        hydra_overrides=overrides,
+        use_torchrun=False,  # single-GPU only; no DDP needed for standalone beta
+    )
+    _run(cmd, run_readme=run_readme, invoke_command=invoke_command)
+    volume.commit()
+
+
+@app.function(
+    image=image,
+    gpu=GPU_EVAL,
+    timeout=86400,
+    volumes={EXPERIMENTS_MOUNT: volume},
+)
+def rollout_hierarchical_external_beta(
+    config_path: str,
+    *,
+    high_checkpoint: str,
+    low_checkpoint: str,
+    standalone_beta_checkpoint: str,
+    n_episodes: int = 50,
+    test_start_seed: int = 100000,
+    n_action_steps: int = 8,
+    beta_transition: float | None = None,
+    max_steps: int = 300,
+    output_dir: str | None = None,
+    no_video: bool = False,
+    video_failure_threshold: float | None = 20.0,
+    invoke_command: str | None = None,
+) -> dict:
+    """
+    Full-episode hierarchical rollout using a StandaloneBeta as the termination signal.
+
+    π_low (k=9 checkpoint) generates actions; StandaloneBeta decides when to switch options.
+    Mirrors rollout_hierarchical but accepts a separate standalone_beta_checkpoint.
+    """
+    from pathlib import Path
+
+    from soda.eval.hierarchical_rollout import run_hierarchical_rollouts
+    from soda.eval.policy_loaders import load_standalone_beta_from_checkpoint
+    from soda.experiments.run_readme import INVOKE_COMMAND_ENV
+
+    import numpy as np
+
+    if invoke_command:
+        os.environ[INVOKE_COMMAND_ENV] = invoke_command
+
+    resolved_config = Path(REPO_ROOT) / config_path
+    high_ckpt = resolve_volume_path(high_checkpoint)
+    low_ckpt = resolve_volume_path(low_checkpoint)
+    beta_ckpt = resolve_volume_path(standalone_beta_checkpoint)
+
+    for label, path in (("π_high", high_ckpt), ("π_low", low_ckpt), ("β", beta_ckpt)):
+        if not path.is_file():
+            raise FileNotFoundError(f"{label} checkpoint not found on Volume: {path}")
+
+    out_dir = (
+        resolve_volume_path(output_dir)
+        if output_dir is not None
+        else Path(hierarchical_rollout_dir()) / "stage4_standalone_beta"
+    )
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    if invoke_command:
+        (out_dir / "invoke_command.txt").write_text(invoke_command + "\n", encoding="utf-8")
+
+    external_beta = load_standalone_beta_from_checkpoint(str(beta_ckpt), device="cuda:0")
+
+    results = run_hierarchical_rollouts(
+        config_path=resolved_config,
+        high_checkpoint=high_ckpt,
+        low_checkpoint=low_ckpt,
+        device="cuda:0",
+        n_episodes=n_episodes,
+        test_start_seed=test_start_seed,
+        n_action_steps=n_action_steps,
+        beta_transition=beta_transition,
+        open_loop=False,
+        duration_termination=False,
+        max_steps=max_steps,
+        output_dir=out_dir,
+        record_video=not no_video,
+        video_overlap_threshold=None if no_video else video_failure_threshold,
+        external_beta=external_beta,
+    )
+
+    volume.commit()
+
+    episodes = []
+    for r in results:
+        episodes.append({
+            "episode_idx": r.episode_idx,
+            "seed": r.seed,
+            "n_steps": r.n_steps,
+            "n_replans": r.n_replans,
+            "metrics": r.metrics,
+            "option_sequence": r.option_sequence[:20],
+            "video_path": str(r.video_path) if r.video_path else None,
+        })
+
+    mean_score = float(
+        sum(e["metrics"].get("max_overlap_full", 0.0) for e in episodes) / len(episodes)
+    ) if episodes else 0.0
+
+    payload = {
+        "config_path": str(resolved_config),
+        "high_checkpoint": str(high_ckpt),
+        "low_checkpoint": str(low_ckpt),
+        "standalone_beta_checkpoint": str(beta_ckpt),
+        "output_dir": str(out_dir),
+        "n_episodes": len(episodes),
+        "mean_max_overlap": mean_score,
+        "episodes": episodes,
+    }
+    print(f"rollout_hierarchical_external_beta OK: n={len(episodes)} mean_max_overlap={mean_score:.1f}%")
+    return payload
+
+
+@app.function(
+    image=image,
+    gpu=_GPU_TRAIN_SPEC,
     timeout=28800,
     volumes={EXPERIMENTS_MOUNT: volume},
     secrets=[_wandb_secret],
@@ -1088,13 +1239,23 @@ def train_high(
             {"train_high.low_checkpoint": low_checkpoint},
             overrides,
         )
+    # Respect output_dir set in the yaml config; only fall back to the default
+    # volume path if the config leaves it null.
+    import yaml as _yaml
+    _config_yaml = Path(REPO_ROOT) / "configs" / task / f"{config_name}.yaml"
+    _yaml_output_dir = None
+    if _config_yaml.exists():
+        with open(_config_yaml) as _f:
+            _y = _yaml.safe_load(_f) or {}
+        _yaml_output_dir = (_y.get("train_high") or {}).get("output_dir")
+    output_dir = _yaml_output_dir or _volume_train_high_dir(task, config_name)
     cmd = _build_train_cmd(
         "soda/training/train_high.py",
         task=task,
         config_name=config_name,
         hydra_subdir="train_high",
         default_overrides={
-            "train_high.output_dir": _volume_train_high_dir(task, config_name),
+            "train_high.output_dir": output_dir,
         },
         hydra_overrides=overrides,
         use_torchrun=True,

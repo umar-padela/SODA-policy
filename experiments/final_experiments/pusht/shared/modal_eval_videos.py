@@ -41,7 +41,7 @@ from modal_config import app, rollout_hierarchical  # noqa: E402
 from soda.experiments.paths import MODAL_VOLUME_NAME, volume_relative_path  # noqa: E402
 
 HIGH_CHECKPOINT = (
-    "/experiments/pusht/train_high_conditioned_prev_option/best.ckpt"
+    "/experiments/final_experiments/pusht/high_study/high_starts_prev_opt/best.ckpt"
 )
 
 PUSHT_FINAL_ROOT = "experiments/final_experiments/pusht"

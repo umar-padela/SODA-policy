@@ -27,6 +27,7 @@ class HierarchicalPolicyConfig:
     beta_diffusion_t: int = 0
     open_loop: bool = False           # resample ω from π_high after every full native chunk (β ignored)
     duration_termination: bool = False  # exit to π_high when duration channel predicts < n_action_steps remain (β ignored)
+    use_external_beta: bool = False   # when True, LowLevelChunkExecutor uses external_beta_fn instead of pi_low.predict_beta
 
 
 @dataclass
@@ -49,9 +50,16 @@ class LowLevelChunkExecutor:
     end the current low-level segment (π_high resamples ω in hierarchical eval).
   """
 
-    def __init__(self, pi_low: Any, config: HierarchicalPolicyConfig) -> None:
+    def __init__(
+        self,
+        pi_low: Any,
+        config: HierarchicalPolicyConfig,
+        *,
+        external_beta_fn: Any | None = None,
+    ) -> None:
         self.pi_low = pi_low
         self.config = config
+        self.external_beta_fn = external_beta_fn
         self._cached_action: torch.Tensor | None = None
         self._cached_action_pred: torch.Tensor | None = None
         self._cached_action_native: torch.Tensor | None = None
@@ -61,6 +69,7 @@ class LowLevelChunkExecutor:
         self._last_replanned: bool = False
         self._last_chunk_was_short: bool = False  # fallback when no duration channel
         self._continuous_horizon: float | None = None  # mean(duration) * horizon, pre-rounding
+        self._fresh_option: bool = False  # True after clear_cache; skip post-replan β check once
 
     @property
     def last_beta(self) -> torch.Tensor | None:
@@ -113,6 +122,7 @@ class LowLevelChunkExecutor:
         self._last_replanned = False
         self._last_chunk_was_short = False
         self._continuous_horizon = None
+        self._fresh_option = True  # guarantee at least one action before β can fire
 
     def _strip_env_actions(self, action: torch.Tensor) -> torch.Tensor:
         dim = int(self.config.env_action_dim)
@@ -123,17 +133,23 @@ class LowLevelChunkExecutor:
     def _check_beta(
         self, obs_dict: dict[str, Any], option_id: torch.Tensor
     ) -> torch.Tensor | None:
-        if self._cached_action_pred is None:
-            return None
         horizon = max(int(getattr(self.pi_low, "horizon", 1)), 1)
         cursor = min(self._option_step_count / horizon, 1.0)
-        beta = self.pi_low.predict_beta(
-            obs_dict,
-            option_id,
-            self._cached_action_pred,
-            diffusion_t=self.config.beta_diffusion_t,
-            chunk_cursor=cursor,
-        )
+
+        if self.external_beta_fn is not None:
+            # Standalone beta: only needs obs + option_id (no cached action plan required).
+            beta = self.external_beta_fn.predict_beta(obs_dict, option_id, chunk_cursor=cursor)
+        else:
+            if self._cached_action_pred is None:
+                return None
+            beta = self.pi_low.predict_beta(
+                obs_dict,
+                option_id,
+                self._cached_action_pred,
+                diffusion_t=self.config.beta_diffusion_t,
+                chunk_cursor=cursor,
+            )
+
         self._last_beta = beta
         return beta
 
@@ -222,18 +238,23 @@ class LowLevelChunkExecutor:
         if self._needs_replan():
             self._run_diffusion(obs_dict, option_id)
             replanned = True
-            # Immediately check β against the fresh plan so a terminal option fires
-            # on the same step it is (re-)planned — not one step later.
-            beta = self._check_beta(obs_dict, option_id)
-            if self._beta_fired(beta):
-                return LowLevelStepResult(
-                    action=torch.empty(0),
-                    action_pred=self._cached_action_pred,
-                    beta=beta,
-                    beta_fired=True,
-                    replanned=True,
-                    action_unstretched=self._cached_action_native,
-                )
+            if self._fresh_option:
+                # Just switched options — take one action before β can fire.
+                self._fresh_option = False
+                beta = self._check_beta(obs_dict, option_id)
+            else:
+                # Immediately check β against the fresh plan so a terminal option fires
+                # on the same step it is (re-)planned — not one step later.
+                beta = self._check_beta(obs_dict, option_id)
+                if self._beta_fired(beta):
+                    return LowLevelStepResult(
+                        action=torch.empty(0),
+                        action_pred=self._cached_action_pred,
+                        beta=beta,
+                        beta_fired=True,
+                        replanned=True,
+                        action_unstretched=self._cached_action_native,
+                    )
 
         assert self._cached_action is not None
         cursor = self._cursor

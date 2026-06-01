@@ -234,7 +234,6 @@ def run_soda_pusht_eval(
         config_name=config_name,
         high_checkpoint=high_checkpoint,
         low_checkpoint=low_checkpoint,
-        n_action_steps=n_action_steps,
     )
     seed = resolve_test_start_seed(test_start_seed, cfg)
 

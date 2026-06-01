@@ -42,7 +42,7 @@ task:
     anchor_cut_last_n: 0
 
 policy:
-  kernel_size: 5               # UPDATE: set to best kernel from kernel_size_study
+  kernel_size: 9
   crop_shape: [84, 84]
   num_inference_steps: 100
   diffusion_step_embed_dim: 128
@@ -60,7 +60,6 @@ low_policy:
   termination_stop_grad: true
   termination_label_smoothing: 0.05
   escape_relabeling: true       # enable wrong-option expand-all (K-1 escapes per anchor)
-  imagenet_init: true
   termination_head:
     bottleneck_dim: 2048
     hidden_dim: 256
@@ -89,8 +88,6 @@ train_low:
   wandb_tags: [termination_study, stage1b, bottleneck_ddim_positive_negative, frozen]
   use_ema: true
   run_readme: null
-  two_phase: false
-  train_phases: both
   num_epochs: 100
   batch_size: 64
   lr: 1.0e-4
@@ -101,7 +98,7 @@ train_low:
   lr_plateau_factor: null
   lr_plateau_min_lr: null
   weight_decay: 1.0e-6
-  checkpoint_every: 50
+  checkpoint_every: 10
   termination_loss_weight: 1.0
   termination_stop_grad: true
   termination_pos_weight: null  # auto-calculated: ~0.46 for K=3, L=17 with escape
@@ -114,12 +111,12 @@ train_low:
   best_checkpoint_metric: loss_termination
   finetune_dp_checkpoint: null
   warmstart_unet: null
-  checkpoint: null              # OVERRIDE at launch
+  checkpoint: /experiments/final_experiments/pusht/kernel_size_study/k9/epoch_0450.ckpt
 
 inference:
-  beta_transition: 0.9
+  beta_transition: 0.92
   beta_diffusion_t: 0
-  high_checkpoint: /experiments/pusht/train_high_conditioned_prev_option/best.ckpt
+  high_checkpoint: /experiments/final_experiments/pusht/high_study/high_starts_prev_opt/best.ckpt
   low_checkpoint: null
 
 eval:

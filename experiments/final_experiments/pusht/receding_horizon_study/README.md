@@ -15,13 +15,19 @@ so that those experiments are directly comparable. This study tunes it once at t
 
 ### Step 1: Sweep n_action_steps on best termination_study checkpoint
 ```bash
-modal run \
+# Run evals (incremental — safe to re-run)
+modal run --detach \
   experiments/final_experiments/pusht/receding_horizon_study/modal_eval_n_action_steps.py \
   --low-checkpoint /experiments/final_experiments/pusht/termination_study/<stage>/<run>/best.ckpt \
   --config configs/pusht/<best_config>.yaml
+
+# Download latest results + worst-5 videos + regenerate plots without triggering new evals
+modal run \
+  experiments/final_experiments/pusht/receding_horizon_study/modal_eval_n_action_steps.py \
+  --download-only
 ```
 
-### Step 2: Plot and choose best n_action_steps
+### Step 2: Plot and choose best n_action_steps (local only, no Modal needed)
 ```bash
 python experiments/final_experiments/pusht/receding_horizon_study/plot_n_action_steps.py \
   --data experiments/final_experiments/pusht/receding_horizon_study/n_action_steps_sweep/sweep_results.json
@@ -29,24 +35,22 @@ python experiments/final_experiments/pusht/receding_horizon_study/plot_n_action_
 
 ## Outputs
 
-**Modal Volume:**
-```
-/experiments/final_experiments/pusht/receding_horizon_study/n_action_steps_sweep/
-  n2/summary.json      ← 50-episode eval results per n_action_steps value
-  n4/summary.json
-  n6/summary.json
-  n8/summary.json
-  n10/summary.json
-  n16/summary.json
-  open_loop/summary.json
-```
+**Modal Volume** and **local mirror** use the same folder name (`receding_horizon_study/`) — no path mapping needed.
 
-**Local:**
 ```
-experiments/final_experiments/pusht/receding_horizon_study/
+receding_horizon_study/
+  debug_videos/                  ← worst-5 failure videos per n_action_steps label; < 20% overlap only
+    n2/
+    n4/
+    n6/
+    n8/
+    n10/
+    n16/
+    open_loop/
   n_action_steps_sweep/
-    sweep_results.json   ← aggregated results for plotting
-    plot_n_action_steps.png
+    sweep_results.json           ← authoritative results (volume) / local mirror
+    debug_videos/                ← local download of worst-5 videos
+    plot_n_action_steps.png      ← generated locally
 ```
 
 ## Decision

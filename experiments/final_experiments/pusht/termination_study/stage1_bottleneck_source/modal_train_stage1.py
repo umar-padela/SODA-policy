@@ -2,12 +2,11 @@
 Train bottleneck_expert and bottleneck_ddim_positive in parallel — termination_study stage 1.
 
 Both runs: 100 epochs, frozen backbone, only β MLP trains.
-Starts from best kernel_size checkpoint (set --base-checkpoint).
+Warmstart checkpoint is set in each config file (exp_term_bottleneck_*.yaml).
 
 Usage (repo root):
   modal run --detach \\
     experiments/final_experiments/pusht/termination_study/stage1_bottleneck_source/modal_train_stage1.py \\
-    --base-checkpoint /experiments/final_experiments/pusht/kernel_size_study/k5/best.ckpt \\
     --run-readme "termination_study stage1 bottleneck source comparison"
 
 Checkpoints saved to:
@@ -34,23 +33,13 @@ ALL_RUNS = [
 
 @app.local_entrypoint()
 def main(
-    base_checkpoint: str,
-    run_readme: str,
+    run_readme: str = "",
     runs: str = "",
 ) -> None:
     """
     Train bottleneck_expert and bottleneck_ddim_positive (in parallel by default).
 
-    Parameters
-    ----------
-    base_checkpoint
-        Volume path to the best checkpoint from kernel_size_study, e.g.
-        /experiments/final_experiments/pusht/kernel_size_study/k5/best.ckpt
-    run_readme
-        Short description archived with each run.
-    runs
-        Comma-separated subset to train, e.g. --runs obs_positive.
-        Omit to train all runs in parallel.
+    Warmstart checkpoint is read from each config file — no CLI override needed.
     """
     selected = {r.strip() for r in runs.split(",") if r.strip()} if runs else None
     configs = [
@@ -65,7 +54,6 @@ def main(
         output_dir = f"{OUTPUT_BASE}/{label}"
         hydra_overrides = [
             f"train_low.output_dir={output_dir}",
-            f"train_low.checkpoint={base_checkpoint}",
             f"train_low.wandb_run_name=term_stage1_{label}",
         ]
         call = train_low.spawn(

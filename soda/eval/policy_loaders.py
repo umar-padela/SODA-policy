@@ -625,3 +625,122 @@ def load_soda_policy(
         low_checkpoint=low_checkpoint,
     )
     return policy, settings
+
+
+def load_standalone_beta_from_checkpoint(
+    checkpoint: str | Path,
+    device: str = "cuda:0",
+) -> Any:
+    """
+    Load a trained StandaloneBeta from a train_beta.py checkpoint.
+
+    The checkpoint contains the full model state_dict (including obs_encoder and
+    normalizer buffers), the StandaloneBetaConfig, and the hydra_cfg needed to
+    rebuild the obs_encoder architecture. ImageNet init is NOT applied here — the
+    trained weights are loaded directly.
+    """
+    import dill
+    import torch
+    from omegaconf import OmegaConf
+
+    checkpoint = Path(checkpoint)
+    payload = torch.load(checkpoint, pickle_module=dill, map_location="cpu")
+
+    sb_raw = payload["standalone_beta_config"]
+    hydra_cfg = OmegaConf.create(payload["hydra_cfg"])
+
+    from soda.models.standalone_beta import StandaloneBeta, StandaloneBetaConfig
+    from soda.models.termination_head import TerminationHead, TerminationHeadConfig
+
+    crop_raw = sb_raw.get("crop_shape", [84, 84])
+    sb_cfg = StandaloneBetaConfig(
+        num_options=int(sb_raw["num_options"]),
+        option_embed_dim=int(sb_raw["option_embed_dim"]),
+        n_obs_steps=int(sb_raw["n_obs_steps"]),
+        crop_shape=(int(crop_raw[0]), int(crop_raw[1])),
+        obs_encoder_group_norm=bool(sb_raw["obs_encoder_group_norm"]),
+        hidden_dim=int(sb_raw["hidden_dim"]),
+        num_layers=int(sb_raw["num_layers"]),
+        dropout_rate=float(sb_raw["dropout_rate"]),
+        use_chunk_cursor=bool(sb_raw["use_chunk_cursor"]),
+    )
+
+    # Build the normalizer to pass into StandaloneBeta.build (won't be used — overwritten by state_dict)
+    _require_diffusion_policy()
+    from diffusion_policy.model.common.normalizer import LinearNormalizer
+
+    dummy_normalizer = LinearNormalizer()
+
+    # Build architecture (imagenet_init=False — trained weights loaded below)
+    model = StandaloneBeta.build(sb_cfg, hydra_cfg, dummy_normalizer, imagenet_init=False)
+
+    # Load trained weights (includes obs_encoder, option_embedding, term_head, normalizer)
+    weights_key = "ema_model" if payload.get("ema_model") is not None else "model"
+    model.load_state_dict(payload[weights_key])
+
+    torch_device = torch.device(device)
+    model.to(torch_device)
+    model.eval()
+    print(f"[load_standalone_beta] Loaded from {checkpoint} (weights_key={weights_key!r})")
+    return model
+
+
+def load_soda_policy_with_external_beta(
+    config_name: str,
+    device: str = "cuda:0",
+    *,
+    high_checkpoint: str | Path | None = None,
+    low_checkpoint: str | Path | None = None,
+    standalone_beta_checkpoint: str | Path,
+) -> tuple[Any, SodaEvalSettings, Any]:
+    """
+    Load HierarchicalPolicy wired with a StandaloneBeta as the external termination signal.
+
+    The π_low checkpoint is used for diffusion action generation only — its internal β head
+    is bypassed. The StandaloneBeta checkpoint provides the termination signal.
+    """
+    import torch
+
+    from soda.inference.hierarchical_controller import (
+        HierarchicalPolicy,
+        HierarchicalPolicyConfig,
+    )
+
+    eval_cfg = load_soda_eval_cfg(config_name)
+    infer_cfg = getattr(eval_cfg, "inference", None)
+    high_path, low_path = resolve_soda_checkpoint_paths(
+        None,
+        high_checkpoint=high_checkpoint,
+        low_checkpoint=low_checkpoint,
+        infer_cfg=infer_cfg,
+    )
+
+    pi_high = load_high_policy_from_checkpoint(high_path, device=device, eval_cfg=eval_cfg)
+    pi_low = load_low_policy_from_checkpoint(low_path, device=device, eval_cfg=eval_cfg)
+    external_beta = load_standalone_beta_from_checkpoint(standalone_beta_checkpoint, device=device)
+
+    option_key = str(eval_cfg.task.dataset.get("option_id_key", "option_id_supervised"))
+    beta_transition = float(
+        _cfg_get(infer_cfg, "beta_transition", 0.92) if infer_cfg is not None else 0.92
+    )
+    beta_diffusion_t = int(
+        _cfg_get(infer_cfg, "beta_diffusion_t", 0) if infer_cfg is not None else 0
+    )
+
+    torch_device = torch.device(device)
+    policy = HierarchicalPolicy(
+        device=torch_device,
+        config=HierarchicalPolicyConfig(
+            config_name=config_name,
+            option_id_key=option_key,
+            beta_transition=beta_transition,
+            beta_diffusion_t=beta_diffusion_t,
+            use_external_beta=True,
+        ),
+        pi_high=pi_high,
+        pi_low=pi_low,
+        external_beta=external_beta,
+    )
+    policy.dtype = getattr(pi_low, "dtype", torch.float32)
+    settings = _settings_from_cfg(eval_cfg, policy_horizon=int(pi_low.horizon))
+    return policy, settings, eval_cfg

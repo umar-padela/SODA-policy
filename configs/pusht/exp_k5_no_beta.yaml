@@ -2,7 +2,7 @@
 # Experiment: receding_horizon_study / kernel_size_study
 # Run: kernel_size=5, no termination head training, 500 epochs, constant LR
 # High policy (fixed, all experiments):
-#   /experiments/pusht/train_high_conditioned_prev_option/best.ckpt
+#   /experiments/final_experiments/pusht/high_study/high_starts_prev_opt/best.ckpt
 #
 # WHAT CHANGES vs other no-beta configs:
 #   policy.kernel_size: 5  (this file)  |  7 (exp_k7)  |  9 (exp_k9)
@@ -88,15 +88,13 @@ train_low:
   run_readme: null
 
   # --- single-phase training ---
-  two_phase: false
-  train_phases: both
 
   # --- schedule: constant LR, no decay ---
   num_epochs: 500
   batch_size: 64
   lr: 1.0e-4                   # matches Columbia DP; constant after warmup
   lr_warmup_epochs: 5          # linear ramp 0→lr over first 5 epochs
-  lr_schedule_type: constant   # no cosine/plateau; loss still decreasing at epoch 500
+  lr_schedule_type: cosine     # warmup 5 epochs then cosine decay to 0 over remaining 495
   lr_plateau_patience: null
   lr_plateau_patience_beta: null
   lr_plateau_factor: null
@@ -127,7 +125,7 @@ train_low:
 inference:
   beta_transition: 0.9
   beta_diffusion_t: 0
-  high_checkpoint: /experiments/pusht/train_high_conditioned_prev_option/best.ckpt
+  high_checkpoint: /experiments/final_experiments/pusht/high_study/high_starts_prev_opt/best.ckpt
   low_checkpoint: null          # set at eval time
 
 eval:

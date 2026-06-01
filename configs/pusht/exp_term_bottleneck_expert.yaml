@@ -40,7 +40,7 @@ task:
 
 # === WHAT CHANGES (update kernel_size to match best from kernel_size_study) ===
 policy:
-  kernel_size: 5               # UPDATE: set to best kernel from kernel_size_study
+  kernel_size: 9
   crop_shape: [84, 84]
   num_inference_steps: 100
   diffusion_step_embed_dim: 128
@@ -59,7 +59,6 @@ low_policy:
   termination_stop_grad: true      # frozen: β gradient does NOT reach backbone
   termination_label_smoothing: 0.05
   escape_relabeling: false
-  imagenet_init: true          # load ImageNet conv weights into GroupNorm ResNet (matches base DP init)
   termination_head:
     bottleneck_dim: 2048           # U-Net bottleneck dim (must equal down_dims[-1])
     hidden_dim: 256
@@ -89,8 +88,6 @@ train_low:
   wandb_tags: [termination_study, stage1, bottleneck_expert, frozen]
   use_ema: true
   run_readme: null
-  two_phase: false
-  train_phases: both
 
   # --- schedule ---
   num_epochs: 100
@@ -103,7 +100,7 @@ train_low:
   lr_plateau_factor: null
   lr_plateau_min_lr: null
   weight_decay: 1.0e-6
-  checkpoint_every: 50         # eval at epoch 50 and 100
+  checkpoint_every: 10         # eval at epoch 50 and 100
 
   # --- termination: ACTIVE, backbone FROZEN ---
   termination_loss_weight: 1.0  # full weight; diffusion is skipped so no balance needed
@@ -122,12 +119,12 @@ train_low:
   # --- checkpoint ---
   finetune_dp_checkpoint: null
   warmstart_unet: null
-  checkpoint: null              # OVERRIDE at launch: train_low.checkpoint=/experiments/.../best.ckpt
+  checkpoint: /experiments/final_experiments/pusht/kernel_size_study/k9/epoch_0450.ckpt
 
 inference:
-  beta_transition: 0.9
+  beta_transition: 0.92
   beta_diffusion_t: 0
-  high_checkpoint: /experiments/pusht/train_high_conditioned_prev_option/best.ckpt
+  high_checkpoint: /experiments/final_experiments/pusht/high_study/high_starts_prev_opt/best.ckpt
   low_checkpoint: null
 
 eval:

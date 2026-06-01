@@ -1,0 +1,122 @@
+# ============================================================
+# Experiment: E3 — Push-T unsupervised option discovery (LOVE)
+# Config: k=9 U-Net, no β head training, 500 epochs, constant LR
+# Key difference vs supervised configs: option_id_key = option_id_unsupervised
+# ============================================================
+
+name: unsupervised_k9_no_beta
+
+n_obs_steps: 2
+n_action_steps: 8
+horizon: null
+past_action_visible: false
+obs_as_global_cond: true
+
+task:
+  name: pusht_image
+  env_runner:
+    legacy_test: true
+    test_start_seed: 100000
+    max_steps: 300
+    fps: 10
+    crf: 22
+    render_size: 96
+    tqdm_interval_sec: 5.0
+  dataset:
+    zarr_path: data/raw/pusht/pusht.zarr
+    option_id_key: option_id_unsupervised      # <-- LOVE labels (vs option_id_supervised in E1)
+    val_ratio: 0.1
+    seed: 42
+    min_segment_len: 3
+    num_workers: 8
+    anchor_cut_last_n: 0
+
+# === WHAT CHANGES ===
+policy:
+  kernel_size: 9
+  crop_shape: [84, 84]
+  num_inference_steps: 100
+  diffusion_step_embed_dim: 128
+  down_dims: [512, 1024, 2048]
+  n_groups: 8
+  cond_predict_scale: true
+  eval_fixed_crop: true
+  obs_encoder_group_norm: true
+
+# === CONSTANT ACROSS ALL EXPERIMENTS ===
+low_policy:
+  num_options: null
+  option_embed_dim: 32
+  bottleneck_dim: 2048
+  termination_input: obs
+  termination_stop_grad: true
+  termination_label_smoothing: 0.05
+  imagenet_init: true
+  termination_head:
+    bottleneck_dim: 2048
+    hidden_dim: 256
+    num_layers: 2
+    use_chunk_cursor: false
+    dropout_rate: 0.0        # β MLP not trained in this experiment
+
+noise_scheduler:
+  num_train_timesteps: 100
+  beta_start: 0.0001
+  beta_end: 0.02
+  beta_schedule: squaredcos_cap_v2
+  clip_sample: true
+  prediction_type: epsilon
+  variance_type: fixed_small
+
+train_low:
+  device: cuda:0
+  seed: 42
+  num_workers: 4
+  output_dir: null
+  wandb_enabled: true
+  wandb_project: soda-final-experiments
+  wandb_run_name: null
+  wandb_group: unsupervised_study
+  wandb_tags: [unsupervised_study, love, k9]
+  use_ema: true
+  run_readme: null
+  num_epochs: 500
+  batch_size: 64
+  lr: 1.0e-4
+  lr_warmup_epochs: 5
+  lr_schedule_type: cosine     # warmup 5 epochs then cosine decay to 0 over remaining 495
+  lr_plateau_patience: null
+  lr_plateau_patience_beta: null
+  lr_plateau_factor: null
+  lr_plateau_min_lr: null
+  weight_decay: 1.0e-6
+  checkpoint_every: 50
+  termination_loss_weight: 0.0
+  termination_stop_grad: true
+  termination_pos_weight: 1.0
+  beta_lr: 1.0e-3
+  beta_stratified_batches: false
+  mask_diffusion_on_positive: false
+  skip_diffusion_loss: false
+  all_anchors: true
+  option_balance: none
+  best_checkpoint_metric: loss_diffusion
+  finetune_dp_checkpoint: null
+  warmstart_unet: null
+  checkpoint: null
+
+inference:
+  beta_transition: 0.9
+  beta_diffusion_t: 0
+  high_checkpoint: /experiments/final_experiments/pusht/high_study/high_starts_prev_opt/best.ckpt
+  low_checkpoint: null
+
+eval:
+  wandb_enabled: true
+  wandb_project: soda-final-experiments
+  policy: soda
+  record_video: true
+  smoke:
+    n_test: 5
+  full:
+    n_test: 50

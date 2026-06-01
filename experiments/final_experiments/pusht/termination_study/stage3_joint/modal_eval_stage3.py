@@ -31,7 +31,7 @@ from modal_config import app, rollout_hierarchical, volume, image, EXPERIMENTS_M
 from soda.experiments.paths import MODAL_VOLUME_NAME, volume_relative_path  # noqa: E402
 
 HIGH_CHECKPOINT = (
-    "/experiments/pusht/train_high_conditioned_prev_option/best.ckpt"
+    "/experiments/final_experiments/pusht/high_study/high_starts_prev_opt/best.ckpt"
 )
 N_EPISODES = 50
 TEST_START_SEED = 100000
@@ -40,7 +40,10 @@ OUTPUT_PATH = Path(
     "experiments/final_experiments/pusht/termination_study/stage3_joint/stage3_results.json"
 )
 VOLUME_OUTPUT_PATH = (
-    f"{EXPERIMENTS_MOUNT}/final_experiments/pusht/termination_study/stage3_joint/stage3_results.json"
+    f"{EXPERIMENTS_MOUNT}/final_experiments/pusht/termination_study/stage3/stage3_results.json"
+)
+LOCAL_DEBUG_DIR = Path(
+    "experiments/final_experiments/pusht/termination_study/stage3_joint/debug_videos"
 )
 
 STAGE3_RUNS = {
@@ -71,20 +74,45 @@ STAGE3_RUNS = {
 }
 
 
+def _download_worst_videos(vol: modal.Volume, results: dict, n_worst: int = 5) -> None:
+    downloaded = 0
+    for run_label, run_results in results.items():
+        for r in run_results:
+            epoch = r["epoch"]
+            scores = r.get("per_episode_scores", [])
+            if not scores:
+                continue
+            worst = [i for i, _ in sorted(enumerate(scores), key=lambda x: x[1])[:n_worst]]
+            vol_base = f"final_experiments/pusht/termination_study/stage3/debug_videos/{run_label}/epoch_{epoch:04d}"
+            out_dir = LOCAL_DEBUG_DIR / run_label / f"epoch_{epoch:04d}"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            for ep_idx in worst:
+                seed = TEST_START_SEED + ep_idx
+                fname = f"ep{ep_idx:04d}_seed{seed}.mp4"
+                out_file = out_dir / fname
+                if out_file.exists():
+                    continue
+                try:
+                    data = b"".join(vol.read_file(volume_relative_path(f"/experiments/{vol_base}/{fname}")))
+                    out_file.write_bytes(data)
+                    print(f"  {run_label}/epoch_{epoch:04d}/{fname}  ({scores[ep_idx]:.1f}%)")
+                    downloaded += 1
+                except Exception:
+                    pass
+    print(f"  {downloaded} video(s) → {LOCAL_DEBUG_DIR}")
+
+
 def _run_plot(output_path: Path) -> None:
     plot_script = Path(__file__).parent / "plot_stage3.py"
-    stage2_path = Path(__file__).parents[1] / "stage2_input_comparison" / "stage2_results.json"
     if not plot_script.exists():
         print(f"  (no plot script at {plot_script}, skipping)")
         return
-    if not stage2_path.exists():
-        print(f"  Skipping plot: stage2 data not found at {stage2_path}")
-        return
+    stage2_path = Path(__file__).parents[1] / "stage2_input_comparison" / "stage2_results.json"
+    cmd = [sys.executable, str(plot_script), "--stage3-data", str(output_path)]
+    if stage2_path.exists():
+        cmd += ["--stage2-data", str(stage2_path)]
     print(f"\nRunning {plot_script.name}...")
-    subprocess.run(
-        [sys.executable, str(plot_script), "--stage3-data", str(output_path), "--stage2-data", str(stage2_path)],
-        check=False,
-    )
+    subprocess.run(cmd, check=False)
 
 
 def _load_existing(vol: modal.Volume) -> dict[str, list[dict]]:
@@ -152,63 +180,75 @@ def _print_summary(results: dict[str, list[dict]]) -> None:
 @app.function(
     image=image,
     gpu=None,
-    timeout=7200,
+    timeout=86400,
     volumes={EXPERIMENTS_MOUNT: volume},
 )
 def _eval_aggregate_stage3(
     work_items: list[dict],
     existing: dict[str, list[dict]],
     n_action_steps: int,
+    max_concurrent: int = 8,
 ) -> dict:
-    """Spawn rollouts, collect results, save JSON to Modal Volume. Runs entirely on Modal."""
+    """Spawn rollouts in batches, collect results, save JSON to Modal Volume. Runs entirely on Modal."""
     import json
     import numpy as np
     from pathlib import Path
-
-    calls = []
-    for item in work_items:
-        call = rollout_hierarchical.spawn(
-            config_path=item["config"],
-            high_checkpoint=HIGH_CHECKPOINT,
-            low_checkpoint=item["ckpt_path"],
-            n_episodes=N_EPISODES,
-            test_start_seed=TEST_START_SEED,
-            n_action_steps=n_action_steps,
-            duration_termination=False,
-            open_loop=False,
-            max_steps=300,
-            no_video=True,
-        )
-        calls.append((item, call))
-
-    print(f"Spawned {len(calls)} rollout jobs. Collecting results...")
 
     stage3_results = {k: list(v) for k, v in existing.items()}
 
     vol_path = Path(VOLUME_OUTPUT_PATH)
     vol_path.parent.mkdir(parents=True, exist_ok=True)
 
-    for item, call in calls:
-        result = call.get()
-        episodes = result.get("episodes") or []
-        scores = [ep["metrics"].get("max_overlap_full", 0.0) for ep in episodes]
-        mean_score = float(np.mean(scores)) if scores else 0.0
-        std_score = float(np.std(scores)) if scores else 0.0
-        run_label = item["run_label"]
-        epoch = item["epoch"]
-        stage3_results.setdefault(run_label, []).append({
-            "epoch": epoch, "checkpoint": item["ckpt_path"],
-            "n_action_steps": n_action_steps, "duration_termination": False,
-            "n_episodes": len(scores), "mean_score": mean_score,
-            "std_score": std_score, "per_episode_scores": scores,
-        })
-        print(f"  {run_label} epoch {epoch}: mean={mean_score:.4f} ± {std_score:.4f}")
+    for batch_start in range(0, len(work_items), max_concurrent):
+        batch = work_items[batch_start:batch_start + max_concurrent]
+        calls = []
+        for item in batch:
+            debug_video_dir = (
+                f"/experiments/final_experiments/pusht/termination_study/stage3"
+                f"/debug_videos/{item['run_label']}/epoch_{item['epoch']:04d}"
+            )
+            call = rollout_hierarchical.spawn(
+                config_path=item["config"],
+                high_checkpoint=HIGH_CHECKPOINT,
+                low_checkpoint=item["ckpt_path"],
+                n_episodes=N_EPISODES,
+                test_start_seed=TEST_START_SEED,
+                n_action_steps=n_action_steps,
+                duration_termination=False,
+                open_loop=False,
+                max_steps=300,
+                no_video=False,
+                output_dir=debug_video_dir,
+            )
+            calls.append((item, call))
 
-        # Save after every result — crash-safe
-        for k in stage3_results:
-            stage3_results[k].sort(key=lambda r: r["epoch"])
-        vol_path.write_text(json.dumps({"n_action_steps": n_action_steps, "results": stage3_results}, indent=2))
-        volume.commit()
+        print(f"Spawned batch of {len(calls)} rollout jobs (items {batch_start+1}–{batch_start+len(calls)} of {len(work_items)}). Collecting...")
+
+        for item, call in calls:
+            run_label = item["run_label"]
+            epoch = item["epoch"]
+            try:
+                result = call.get()
+            except Exception as e:
+                print(f"  {run_label} epoch {epoch}: FAILED ({e}) — skipping")
+                continue
+            episodes = result.get("episodes") or []
+            scores = [ep["metrics"].get("max_overlap_full", 0.0) for ep in episodes]
+            mean_score = float(np.mean(scores)) if scores else 0.0
+            std_score = float(np.std(scores)) if scores else 0.0
+            stage3_results.setdefault(run_label, []).append({
+                "epoch": epoch, "checkpoint": item["ckpt_path"],
+                "n_action_steps": n_action_steps, "duration_termination": False,
+                "n_episodes": len(scores), "mean_score": mean_score,
+                "std_score": std_score, "per_episode_scores": scores,
+            })
+            print(f"  {run_label} epoch {epoch}: mean={mean_score:.4f} ± {std_score:.4f}")
+
+            # Save after every result — crash-safe
+            for k in stage3_results:
+                stage3_results[k].sort(key=lambda r: r["epoch"])
+            vol_path.write_text(json.dumps({"n_action_steps": n_action_steps, "results": stage3_results}, indent=2))
+            volume.commit()
 
     output = {"n_action_steps": n_action_steps, "results": stage3_results}
     print(f"Saved to volume → {VOLUME_OUTPUT_PATH}")
@@ -216,11 +256,19 @@ def _eval_aggregate_stage3(
 
 
 @app.local_entrypoint()
-def main(n_action_steps: int = 8) -> None:
+def main(n_action_steps: int = 8, download_only: bool = False, max_concurrent: int = 8) -> None:
     vol = modal.Volume.from_name(MODAL_VOLUME_NAME)
-    eval_epochs = [50, 100]
 
     stage3_results = _load_existing(vol)
+
+    if download_only:
+        _print_summary(stage3_results)
+        _download_from_volume(vol)
+        _download_worst_videos(vol, stage3_results)
+        _run_plot(OUTPUT_PATH)
+        return
+
+    eval_epochs = [50, 100]
     already_done = _already_evaluated(stage3_results)
 
     work_items = []
@@ -241,15 +289,17 @@ def main(n_action_steps: int = 8) -> None:
         print("\nNo new checkpoints to evaluate.")
         _print_summary(stage3_results)
         _download_from_volume(vol)
+        _download_worst_videos(vol, stage3_results)
         _run_plot(OUTPUT_PATH)
         return
 
     print(f"\nSubmitting {len(work_items)} eval jobs to Modal aggregator...")
     print("Safe to close terminal with --detach; results saved to Modal Volume automatically.")
 
-    agg_call = _eval_aggregate_stage3.spawn(work_items, stage3_results, n_action_steps)
+    agg_call = _eval_aggregate_stage3.spawn(work_items, stage3_results, n_action_steps, max_concurrent)
     result = agg_call.get()
 
     _print_summary(result["results"])
     _download_from_volume(vol)
+    _download_worst_videos(vol, result["results"])
     _run_plot(OUTPUT_PATH)

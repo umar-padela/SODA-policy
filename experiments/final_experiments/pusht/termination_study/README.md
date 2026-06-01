@@ -59,25 +59,45 @@ modal run --detach `
   --run-readme "termination_study stage1b escape signal"
 ```
 
-### Stage 1a: Eval + pick bottleneck_best
+### Stage 1a + 1b: Eval together (recommended)
 
 ```powershell
-modal run `
-  experiments/final_experiments/pusht/termination_study/stage1_bottleneck_source/modal_eval_stage1.py
+# Run all evals (incremental — skips already-done checkpoints)
+modal run --detach `
+  experiments/final_experiments/pusht/termination_study/modal_eval_stage1_all.py
 
-python experiments/final_experiments/pusht/termination_study/stage1_bottleneck_source/plot_stage1.py `
-  --data experiments/final_experiments/pusht/termination_study/stage1_bottleneck_source/stage1_results.json
+# Download latest results + worst-5 videos + regenerate plots without triggering new evals
+modal run `
+  experiments/final_experiments/pusht/termination_study/modal_eval_stage1_all.py --download-only
 ```
 
-### Stage 1b: Eval + pick obs_best (and whether escape helps bottleneck)
+Results JSON on volume: `final_experiments/pusht/termination_study/stage1/stage1_results.json`
+and `stage1b/stage1b_results.json`. Local mirror: same path under `experiments/`.
+
+### Stage 1a + 1b: Eval individually (if needed)
 
 ```powershell
-modal run `
+modal run --detach `
+  experiments/final_experiments/pusht/termination_study/stage1_bottleneck_source/modal_eval_stage1.py
+modal run --detach `
   experiments/final_experiments/pusht/termination_study/stage1b_obs_signal/modal_eval_stage1b.py
+```
+
+### Stage 1a + 1b: Regenerate plots from local data (no Modal)
+
+```powershell
+python experiments/final_experiments/pusht/termination_study/stage1_bottleneck_source/plot_stage1.py `
+  --data experiments/final_experiments/pusht/termination_study/stage1/stage1_results.json `
+  --output-dir experiments/final_experiments/pusht/termination_study/stage1
 
 python experiments/final_experiments/pusht/termination_study/stage1b_obs_signal/plot_stage1b.py `
-  --data experiments/final_experiments/pusht/termination_study/stage1b_obs_signal/stage1b_results.json
+  --data experiments/final_experiments/pusht/termination_study/stage1b/stage1b_results.json `
+  --output-dir experiments/final_experiments/pusht/termination_study/stage1b
 ```
+
+Plots land in `stage1/` and `stage1b/` alongside the JSONs. Each stage produces:
+- `plot_stage1_score_vs_epoch.png` — mean ± std vs epoch; gray dashed line = duration termination baseline (97.97%)
+- `plot_stage1_best.png` — bar chart of best epoch per run
 
 ---
 
@@ -136,24 +156,45 @@ modal run `
 Best policy = highest mean_score across all stages. Pass to `receding_horizon_study` then `comparison_study`.
 If no β variant beats duration_termination baseline by >1 std → use duration termination (valid negative result).
 
-## Volume layout
+## Path mapping: Modal volume vs local repo
 
+The Modal volume uses short stage names; the local repo uses descriptive folder names.
+Scripts handle the translation automatically — do not mix them up manually.
+
+| Modal volume path | Local repo path |
+|---|---|
+| `stage1/` | `stage1_bottleneck_source/` |
+| `stage1b/` | `stage1b_obs_signal/` |
+| `stage2/` | `stage2_input_comparison/` |
+| `stage3/` | `stage3_joint/` |
+
+**Within each stage on the volume:**
 ```
-/experiments/final_experiments/pusht/termination_study/
-  stage1/
-    bottleneck_expert/
-    bottleneck_ddim_positive/
-  stage1b/
-    bottleneck_ddim_positive_negative/
-    obs_positive/
-    obs_positive_negative/
-  stage2/
-    both/
-  stage3/
-    bottleneck_expert_joint/
-    bottleneck_ddim_positive_joint/
-    bottleneck_ddim_positive_negative_joint/
-    obs_positive_joint/
-    obs_positive_negative_joint/
-    both_joint/
+stage1/
+  bottleneck_expert/       ← training checkpoints (written by train scripts)
+  bottleneck_ddim_positive/
+  debug_videos/            ← worst-5 failure videos; episodes < 20% overlap only
+  stage1_results.json      ← eval results (authoritative)
 ```
+
+**Locally (same structure, different folder name):**
+```
+stage1_bottleneck_source/
+  debug_videos/            ← downloaded from Modal by eval scripts
+  stage1_results.json      ← downloaded from Modal by eval scripts
+  plot_stage1_*.png        ← generated locally from the JSON
+```
+
+### Copying files within the Modal volume (no `cp` command — download then re-upload)
+
+```powershell
+! modal volume get soda-experiments final_experiments/pusht/termination_study/stage1/stage1_results.json tmp.json
+! modal volume put soda-experiments tmp.json final_experiments/pusht/termination_study/stage1/stage1_results.json
+Remove-Item tmp.json
+```
+
+## Beta termination notes
+
+- `beta_transition=0.92` set in `inference.beta_transition` in each `exp_term_*.yaml` config
+- After any option switch, the post-replan β check is skipped for one step (`_fresh_option` flag in `LowLevelChunkExecutor`) — guarantees at least one action is taken before β can fire again
+- Videos saved only for episodes below 20% overlap (`video_failure_threshold=20.0` default in `rollout_hierarchical`)

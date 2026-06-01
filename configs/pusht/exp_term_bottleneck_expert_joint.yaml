@@ -1,0 +1,135 @@
+# ============================================================
+# Experiment: termination_study / stage3_joint
+# Run: BOTTLENECK_EXPERT, stop_grad=FALSE — β gradient flows into backbone
+#   Diffusion trains alongside β (restoring force prevents backbone collapse).
+#   λ=0.01: β contributes ~10% of total backbone gradient signal.
+#   Backbone is NOT frozen; both diffusion and β shape the U-Net.
+#
+# WHAT CHANGES vs exp_term_bottleneck_expert (stage1a):
+#   termination_stop_grad: false  (β gradient reaches backbone)
+#   skip_diffusion_loss: false    (diffusion trains simultaneously)
+#   termination_loss_weight: 0.01 (λ, balances β vs diffusion)
+#   wandb_group/tags: updated to stage3
+#
+# NOTE: kernel_size and checkpoint — same as stage1/2 configs.
+# ============================================================
+
+name: exp_term_bottleneck_expert_joint
+
+n_obs_steps: 2
+n_action_steps: 8
+horizon: null
+past_action_visible: false
+obs_as_global_cond: true
+
+task:
+  name: pusht_image
+  env_runner:
+    legacy_test: true
+    test_start_seed: 100000
+    max_steps: 300
+    fps: 10
+    crf: 22
+    render_size: 96
+    tqdm_interval_sec: 5.0
+  dataset:
+    zarr_path: data/raw/pusht/pusht.zarr
+    option_id_key: option_id_supervised
+    val_ratio: 0.1
+    seed: 42
+    min_segment_len: 3
+    num_workers: 8
+    anchor_cut_last_n: 0
+
+policy:
+  kernel_size: 9
+  crop_shape: [84, 84]
+  num_inference_steps: 100
+  diffusion_step_embed_dim: 128
+  down_dims: [512, 1024, 2048]
+  n_groups: 8
+  cond_predict_scale: true
+  eval_fixed_crop: true
+  obs_encoder_group_norm: true
+
+# === WHAT CHANGES vs stage1a frozen ===
+low_policy:
+  num_options: null
+  option_embed_dim: 32
+  bottleneck_dim: 2048
+  termination_input: bottleneck    # expert actions at t=0
+  termination_stop_grad: false     # <-- CHANGED: β gradient flows into U-Net
+  termination_label_smoothing: 0.05
+  escape_relabeling: false
+  termination_head:
+    bottleneck_dim: 2048
+    hidden_dim: 256
+    num_layers: 2
+    use_chunk_cursor: false
+    dropout_rate: 0.3        # regularize beta MLP; ~1300 positives, risk of overfitting
+
+# === CONSTANT ACROSS ALL EXPERIMENTS ===
+noise_scheduler:
+  num_train_timesteps: 100
+  beta_start: 0.0001
+  beta_end: 0.02
+  beta_schedule: squaredcos_cap_v2
+  clip_sample: true
+  prediction_type: epsilon
+  variance_type: fixed_small
+
+train_low:
+  device: cuda:0
+  seed: 42
+  num_workers: 4
+  output_dir: null
+  wandb_enabled: true
+  wandb_project: soda-final-experiments
+  wandb_run_name: null
+  wandb_group: termination_study_stage3
+  wandb_tags: [termination_study, stage3, bottleneck_expert, joint]
+  use_ema: true
+  run_readme: null
+  num_epochs: 100
+  batch_size: 64
+  lr: 3.0e-6
+  lr_warmup_epochs: 0             # backbone already trained; no warmup
+  lr_schedule_type: constant
+  lr_plateau_patience: null
+  lr_plateau_patience_beta: null
+  lr_plateau_factor: null
+  lr_plateau_min_lr: null
+  weight_decay: 1.0e-6
+  checkpoint_every: 10
+
+  # --- termination: ACTIVE, backbone UNFROZEN ---
+  termination_loss_weight: 0.01   # <-- CHANGED: λ=0.01 balances β vs diffusion gradient
+  termination_stop_grad: false    # <-- CHANGED: β gradient flows into backbone
+  termination_pos_weight: null    # auto-calculated from data (n_neg/n_pos, escape-aware)
+  beta_lr: 1.0e-3
+  skip_diffusion_loss: false      # <-- CHANGED: diffusion trains (restoring force)
+  beta_stratified_batches: false
+  mask_diffusion_on_positive: false
+
+  all_anchors: true
+  option_balance: none
+  best_checkpoint_metric: loss_termination
+  finetune_dp_checkpoint: null
+  warmstart_unet: null
+  checkpoint: /experiments/final_experiments/pusht/kernel_size_study/k9/epoch_0450.ckpt
+
+inference:
+  beta_transition: 0.92
+  beta_diffusion_t: 0
+  high_checkpoint: /experiments/final_experiments/pusht/high_study/high_starts_prev_opt/best.ckpt
+  low_checkpoint: null
+
+eval:
+  wandb_enabled: true
+  wandb_project: soda-final-experiments
+  policy: soda
+  record_video: true
+  smoke:
+    n_test: 5
+  full:
+    n_test: 50

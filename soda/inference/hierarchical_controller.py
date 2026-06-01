@@ -46,6 +46,7 @@ class HierarchicalPolicy:
         checkpoint: Path | None = None,
         pi_high: Any | None = None,
         pi_low: Any | None = None,
+        external_beta: Any | None = None,
     ) -> None:
         self.device = device
         self.dtype = torch.float32
@@ -53,11 +54,13 @@ class HierarchicalPolicy:
         self.checkpoint = checkpoint
         self._pi_high = pi_high
         self._pi_low = pi_low
+        self._external_beta = external_beta
         self._executor: LowLevelChunkExecutor | None = None
         self._current_option_id: torch.Tensor | None = None
         self._prev_option_id: int | None = None  # None = episode start (null token)
         self._last_overlay: LowPolicyOverlayInfo = LowPolicyOverlayInfo()
         self._last_option_id: int | None = None
+        self._last_fired_beta: torch.Tensor | None = None  # beta that triggered most recent option switch
 
     @property
     def last_overlay(self) -> LowPolicyOverlayInfo:
@@ -91,7 +94,9 @@ class HierarchicalPolicy:
 
     def _executor_for(self, pi_low: Any) -> LowLevelChunkExecutor:
         if self._executor is None or self._executor.pi_low is not pi_low:
-            self._executor = LowLevelChunkExecutor(pi_low, self.config)
+            self._executor = LowLevelChunkExecutor(
+                pi_low, self.config, external_beta_fn=self._external_beta
+            )
         else:
             self._executor.config = self.config
         return self._executor
@@ -101,6 +106,7 @@ class HierarchicalPolicy:
         self._prev_option_id = None
         self._last_overlay = LowPolicyOverlayInfo()
         self._last_option_id = None
+        self._last_fired_beta = None
         if self._executor is not None:
             self._executor.reset()
         elif self._pi_low is not None and hasattr(self._pi_low, "reset"):
@@ -110,7 +116,11 @@ class HierarchicalPolicy:
 
     def _overlay_from_result(self, result: LowLevelStepResult) -> LowPolicyOverlayInfo:
         beta_val = None
-        if result.beta is not None:
+        # If a switch just happened, show the beta that fired rather than the new plan's beta.
+        fired = self._last_fired_beta
+        if fired is not None:
+            beta_val = float(fired.reshape(-1)[0].detach().cpu().item())
+        elif result.beta is not None:
             beta_val = float(result.beta.reshape(-1)[0].detach().cpu().item())
         dur_mean = dur_std = decoded_native = horizon = None
         pred = result.action_pred
@@ -179,9 +189,11 @@ class HierarchicalPolicy:
             if self._current_option_id is None:
                 self._current_option_id = self._sample_option(pi_high, obs_dict)
 
+            self._last_fired_beta = None
             for _ in range(8):
                 result = executor.step(obs_dict, self._current_option_id)
                 if result.beta_fired:
+                    self._last_fired_beta = result.beta
                     self._prev_option_id = int(self._current_option_id.reshape(-1)[0].item())
                     self._current_option_id = self._sample_option(pi_high, obs_dict)
                     executor.clear_cache()

@@ -31,6 +31,24 @@ def _require_diffusion_policy() -> None:
     _req()
 
 
+def _patch_async_vector_env() -> None:
+    """gym 0.23+ raises CustomSpaceError for OrderedDict obs spaces when shared_memory=True.
+    Columbia's AsyncVectorEnv defaults to shared_memory=True; patch to False for compatibility."""
+    from diffusion_policy.gym_util import async_vector_env as _ave
+
+    orig_init = _ave.AsyncVectorEnv.__init__
+
+    def _patched_init(self, env_fns, dummy_env_fn=None, observation_space=None,
+                      action_space=None, shared_memory=False, copy=True,
+                      context=None, daemon=True, worker=None):
+        orig_init(self, env_fns, dummy_env_fn=dummy_env_fn,
+                  observation_space=observation_space, action_space=action_space,
+                  shared_memory=shared_memory, copy=copy,
+                  context=context, daemon=daemon, worker=worker)
+
+    _ave.AsyncVectorEnv.__init__ = _patched_init
+
+
 def run_training(yaml_cfg: Any) -> Path:
     """Build Columbia workspace from ``dp.yaml`` and run training."""
     import hydra
@@ -41,6 +59,7 @@ def run_training(yaml_cfg: Any) -> Path:
     )
 
     _require_diffusion_policy()
+    _patch_async_vector_env()
     workspace_cfg = build_columbia_workspace_cfg(yaml_cfg)
     out_dir = resolve_dp_output_dir(yaml_cfg)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -58,9 +77,18 @@ def run_training(yaml_cfg: Any) -> Path:
 
     cls = hydra.utils.get_class(workspace_cfg._target_)
     workspace = cls(workspace_cfg, output_dir=str(out_dir))
-    workspace.run()
-    finalize_training_run_archive(run_archive)
-    return out_dir
+    try:
+        workspace.run()
+    finally:
+        # AsyncVectorEnv worker processes can cause non-zero exit on cleanup;
+        # finalize archive regardless, then force a clean exit.
+        try:
+            finalize_training_run_archive(run_archive)
+        except Exception as e:
+            print(f"Warning: archive finalization failed (checkpoints still saved): {e}")
+        import os
+        os._exit(0)
+    return out_dir  # unreachable but satisfies type checker
 
 
 def main(cfg: Any) -> None:

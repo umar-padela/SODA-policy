@@ -15,13 +15,10 @@
 # Compatible with obs-based β only — incompatible with bottleneck-based β
 # due to train/inference distribution mismatch in the U-Net forward pass.
 #
-# Implementation: OptionAwareDataset, train split only — with probability
-# escape_prob, replaces option_id with a random wrong option and sets β=1.
+# Implementation: OptionAwareDataset expand-all — each (seg, anchor) generates
+# 1 real sample + K-1 escape samples (one per wrong option). Dataset expands by K.
 # Val split always uses real labels only (escape_relabeling=False on val).
-#
-# Data balance: with escape_prob=0.5, ~50% of batch slots become escape
-# positives, making the positive class roughly balanced. Reduce
-# termination_pos_weight to 1.0–2.0 (vs. 10.0 in obs_positive).
+# pos_weight is auto-calculated to account for the expanded positive class.
 # ============================================================
 
 name: exp_term_obs_positive_negative
@@ -52,7 +49,7 @@ task:
     anchor_cut_last_n: 0
 
 policy:
-  kernel_size: 5               # UPDATE: set to best kernel from kernel_size_study
+  kernel_size: 9
   crop_shape: [84, 84]
   num_inference_steps: 100
   diffusion_step_embed_dim: 128
@@ -70,8 +67,6 @@ low_policy:
   termination_stop_grad: true
   termination_label_smoothing: 0.05
   escape_relabeling: true       # enable wrong-option escape examples
-  escape_prob: 0.5              # probability of replacing option_id with wrong option per sample
-  imagenet_init: true
   termination_head:
     bottleneck_dim: 2048
     hidden_dim: 256
@@ -100,15 +95,17 @@ train_low:
   wandb_tags: [termination_study, stage1b, obs_positive_negative, frozen]
   use_ema: true
   run_readme: null
-  two_phase: false
-  train_phases: both
   num_epochs: 100
   batch_size: 64
   lr: 1.0e-4
   lr_warmup_epochs: 0
   lr_schedule_type: constant
+  lr_plateau_patience: null
+  lr_plateau_patience_beta: null
+  lr_plateau_factor: null
+  lr_plateau_min_lr: null
   weight_decay: 1.0e-6
-  checkpoint_every: 50
+  checkpoint_every: 10
   termination_loss_weight: 1.0
   termination_stop_grad: true
   termination_pos_weight: null  # auto-calculated from data (n_neg/n_pos, escape-aware)
@@ -121,12 +118,12 @@ train_low:
   best_checkpoint_metric: loss_termination
   finetune_dp_checkpoint: null
   warmstart_unet: null
-  checkpoint: null              # OVERRIDE at launch
+  checkpoint: /experiments/final_experiments/pusht/kernel_size_study/k9/epoch_0450.ckpt
 
 inference:
-  beta_transition: 0.9
+  beta_transition: 0.92
   beta_diffusion_t: 0
-  high_checkpoint: /experiments/pusht/train_high_conditioned_prev_option/best.ckpt
+  high_checkpoint: /experiments/final_experiments/pusht/high_study/high_starts_prev_opt/best.ckpt
   low_checkpoint: null
 
 eval:

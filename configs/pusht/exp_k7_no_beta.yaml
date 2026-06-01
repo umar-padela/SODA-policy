@@ -80,13 +80,11 @@ train_low:
   wandb_tags: [kernel_size_study, k7]
   use_ema: true
   run_readme: null
-  two_phase: false
-  train_phases: both
   num_epochs: 500
   batch_size: 64
   lr: 1.0e-4
   lr_warmup_epochs: 5
-  lr_schedule_type: constant
+  lr_schedule_type: cosine     # warmup 5 epochs then cosine decay to 0 over remaining 495
   lr_plateau_patience: null
   lr_plateau_patience_beta: null
   lr_plateau_factor: null
@@ -110,7 +108,7 @@ train_low:
 inference:
   beta_transition: 0.9
   beta_diffusion_t: 0
-  high_checkpoint: /experiments/pusht/train_high_conditioned_prev_option/best.ckpt
+  high_checkpoint: /experiments/final_experiments/pusht/high_study/high_starts_prev_opt/best.ckpt
   low_checkpoint: null
 
 eval:

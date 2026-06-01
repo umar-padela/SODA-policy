@@ -39,7 +39,7 @@ This study addresses the following questions, in dependency order:
 
 All experiments share a fixed high policy:
 ```
-/experiments/pusht/train_high_conditioned_prev_option/best.ckpt
+/experiments/final_experiments/pusht/high_starts_prev_opt/best.ckpt
 ```
 This policy was trained with multi-anchor augmentation and prev-option conditioning, achieving 92% option classification accuracy on Push-T. It is held constant throughout to isolate the effect of low-policy design choices.
 
@@ -48,7 +48,7 @@ This policy was trained with multi-anchor augmentation and prev-option condition
 | Parameter | Value | Rationale |
 |-----------|-------|-----------|
 | `lr` | 1e-4 | Matches Columbia DP; loss still decreasing at epoch 500 |
-| `lr_schedule_type` | constant | Cosine over 500 epochs kills LR prematurely |
+| `lr_schedule_type` | cosine (kernel_sweep) / constant (termination) | kernel_sweep: 5-epoch linear warmup then cosine decay to 0 over 495 epochs. termination_study: constant at 1e-4 backbone (frozen, lr=0 effective) / 1e-3 β MLP for all 100 epochs — cosine over 100 epochs would decay LR too aggressively before β converges |
 | `weight_decay` | 1e-6 | Matches Columbia DP |
 | `batch_size` | 64 | Matches Columbia DP |
 | `option_embed_dim` | 32 | Locked (checkpoint compatibility) |
@@ -103,7 +103,7 @@ The kernel with the highest best-epoch mean_score is used as the backbone for al
 
 ## 4. Experiment 2: termination_study
 
-The termination study has four sequential stages. All stages: 100 epochs, frozen backbone (stages 1–2) or joint (stage 3), β MLP lr=1e-3, termination_pos_weight=10 (γ = avg_segment_len × 0.6 ≈ 17 × 0.6 ≈ 10), label_smoothing=0.05. All evals use `n_action_steps=8`.
+The termination study has four sequential stages. All stages: 100 epochs, frozen backbone (stages 1–2) or joint (stage 3), β MLP lr=1e-3, termination_pos_weight=null (auto-calculated from dataset class frequencies, escape-relabeling-aware), label_smoothing=0.05. All evals use `n_action_steps=8`.
 
 ### Background: Why β?
 
@@ -186,6 +186,34 @@ Repeat stages 1a, 1b, and 2 with β gradients flowing into the backbone (stop_gr
 **Runs**: `bottleneck_expert_joint`, `bottleneck_ddim_positive_joint`, `obs_positive_joint`, `obs_positive_negative_joint` (all from 1a+1b, run in parallel), then `both_joint` after 1a+1b decisions are in. Note: `bottleneck_best_joint` and `obs_best_joint` are not separate runs — they are whichever 1a/1b joint runs won, so stage 2 only adds `both_joint` as a new training session.
 
 **Decision**: For each frozen configuration, compare joint vs frozen. If joint does not improve, use the frozen checkpoint. Best joint or frozen result → `term_best` for comparison_study.
+
+---
+
+### Stage 4: Standalone ResNet β (Fresh ImageNet Init, Fully Trainable)
+
+**Q5: Does a dedicated, free-to-adapt ResNet outperform a shared encoder frozen at DP pretraining?**
+
+**Motivation**: Stages 1–3 all share the obs encoder with the diffusion backbone. Even in the joint training stage (stop_grad=False), the ResNet is initialized from the DP checkpoint and receives competing gradients from both diffusion MSE and termination BCE. Stage 4 removes this coupling entirely: a fresh ResNet (ImageNet init) owns its own weights and is trained purely to detect termination states, with no diffusion loss interfering.
+
+**Run**: `obs_positive_negative_separate`
+- Architecture: ResNet18Conv (ImageNet init, GroupNorm, trainable) + option embed + TerminationHead MLP
+- Training signal: completion + escape relabeling (positive_negative, same as stage 1b `obs_positive_negative`)
+- MLP capacity: hidden_dim=256, num_layers=2, dropout_rate=0.3 — identical to other term experiments
+- k=9/450-epoch LowPolicy: used **only** for obs normalizer; its weights are not loaded
+
+**What is different from `obs_positive_negative` (stage 1b)**:
+- ResNet starts from ImageNet (not DP checkpoint)
+- ResNet receives gradients from BCE loss (not frozen)
+- Model is completely separate — no shared parameters with π_low
+
+**Training**: 100 epochs, single Adam optimizer (lr=1e-4), checkpoint_every=10, use_ema=True.
+**Eval**: Epochs [50, 100] via `rollout_hierarchical_external_beta` (50-episode rollout, beta termination mode, beta_transition=0.92). Rollout mean score is the authoritative checkpoint selection criterion — beta_val_acc_pos/neg are informational only.
+**Scripts**:
+- Train: `modal run --detach experiments/final_experiments/pusht/termination_study/stage4_standalone_beta/modal_train_stage4.py`
+- Eval:  `modal run experiments/final_experiments/pusht/termination_study/stage4_standalone_beta/modal_eval_stage4.py`
+- Results: `/experiments/final_experiments/pusht/termination_study/stage4/obs_positive_negative_separate/`
+
+**Comparison baseline**: `obs_positive_negative` (stage 1b) — same training signal, same MLP, but obs encoder is frozen DP ResNet. If stage 4 outperforms stage 1b, a dedicated ResNet adds value beyond the shared DP representation.
 
 ---
 
@@ -291,7 +319,64 @@ code changes.
 
 ---
 
-## 10. Anticipated Failure Modes
+## 10. Proposed Experiment: Full-State High Policy Training
+
+### Motivation
+
+The current π_high is trained only on segment-start observations: for each skill transition in the expert demos, it sees the state at the moment the new skill begins and learns to predict which skill was selected. This creates a **distribution mismatch at inference**: when β fires and π_high is called, the current state may not look like any segment-start state in training data — it could be a mid-skill state, a stuck state, or a state partway through an unusual trajectory. π_high has no training signal for these cases and must extrapolate blindly.
+
+### Proposed Reformulation
+
+Instead of learning "what skill should I start at this transition?", train π_high to answer "what skill would the expert be executing in this state?" for **any frame in the demonstrations**.
+
+**Training data**: all (obs, option_id) pairs from the zarr — every frame from every segment, not just segment starts. The option_id label for a frame is whichever skill the expert was demonstrating at that timestep.
+
+**Why this is better for inference**: when β fires from any state (including unusual ones), π_high has seen states that look like the current one during training. The model has learned a state→option mapping over the full state distribution, not just the thin slice of segment-start states.
+
+**Visual ambiguity concern**: The end of reposition looks similar to the start of linear push. However, in Push-T these states are still discriminable — at the end of reposition the agent is not contacting the block, whereas at the start of linear push it is. The frozen obs encoder (or a jointly trained one) should capture this distinction via contact state and block position.
+
+### Key Design Decisions
+
+- **No prev_option conditioning** — the model answers "what skill is this state in?" independently, without needing to know the previous skill. This is a cleaner and more general formulation.
+- **No inverse-frequency weighting** — option A having 3× more frames than option B means the expert genuinely spends 3× more time in option A. This is a real signal about `P(option | state)` and should be preserved. Reweighting would distort the learned prior, causing the model to over-predict rare options relative to their true inference-time frequency.
+- **Label smoothing** — retain `label_smoothing: 0.1` (same as current π_high config) to prevent logit explosion on easy training examples and handle visually ambiguous boundary frames where the end of one skill looks like the start of the next.
+- **Controlled comparison** — run with the same obs encoder checkpoint and same architecture as the current π_high, changing only the dataset sampling.
+
+### Implementation Plan
+
+**1. New dataset mode in `OptionStartDataset` or new `OptionAllFramesDataset`** (`soda/dataset/option_start_dataset.py` or new file):
+- Load all (obs, option_id) pairs from zarr, not just segment starts
+- Same train/val split by episode as current dataset
+- Inverse-frequency class weights computed from frame counts per option
+
+**2. Config flag in `high_policy` block**:
+```yaml
+high_policy:
+  train_on_all_frames: false   # false = current behavior (segment starts only)
+                               # true  = all frames, "what skill is the expert in?"
+  condition_on_prev_option: false  # should be false for all-frames mode
+```
+
+**3. `train_high.py` changes**:
+- Read `train_on_all_frames` flag from config
+- When true: use new full-frame dataset instead of `OptionStartDataset`
+- Pass per-class inverse-frequency weights to cross-entropy loss
+- Assert `condition_on_prev_option: false` when `train_on_all_frames: true` (prev option is not well-defined for arbitrary frames)
+
+**4. New experiment config** (`configs/pusht/exp_high_all_frames.yaml` or flag in `soda_supervised.yaml`):
+- `train_on_all_frames: true`
+- `condition_on_prev_option: false`
+- Same architecture otherwise
+
+**5. Evaluation**: run standard π_high eval (option classification accuracy on held-out segment starts) plus downstream hierarchical rollout comparison.
+
+### Decision Rule
+
+If all-frames π_high achieves comparable or better option classification accuracy on segment-start val frames AND improves downstream rollout scores (fewer stuck episodes, cleaner option transitions), adopt as the default training mode.
+
+---
+
+## 11. Anticipated Failure Modes
 
 1. **β never fires accurately**: If β accuracy stays below 70% on val, the bottleneck/obs features are not discriminative enough for terminal-state detection. Mitigation: try higher pos_weight or lower label_smoothing.
 

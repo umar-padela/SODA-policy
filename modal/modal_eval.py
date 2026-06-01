@@ -65,6 +65,7 @@ def _build_invoke_command(
     ckpt_slug: str | None,
     no_video: bool,
     local_save_path: str | None,
+    output_dir: str | None,
 ) -> str:
     parts = ["modal run modal/modal_eval.py", f'--run-readme "{run_readme}"', f"--config {config}"]
     if full:
@@ -89,6 +90,8 @@ def _build_invoke_command(
         parts.append("--no-video")
     if local_save_path:
         parts.append(f"--local-save-path {local_save_path}")
+    if output_dir:
+        parts.append(f"--output-dir {output_dir}")
     return " ".join(parts)
 
 
@@ -107,6 +110,7 @@ def main(
     ckpt_slug: str | None = None,
     no_video: bool = False,
     local_save_path: str | None = None,
+    output_dir: str | None = None,
 ):
     """
     Run Push-T eval on Modal.
@@ -123,6 +127,9 @@ def main(
         Override yaml checkpoint paths.
     n_test, max_steps, n_action_steps, n_test_vis
         Override yaml eval settings.
+    output_dir
+        Override the output directory on the Modal Volume (relative to /experiments).
+        E.g. ``final_experiments/pusht/comparison_study/dp_k5``.
     """
     invoke_command = _build_invoke_command(
         config=config,
@@ -138,6 +145,7 @@ def main(
         ckpt_slug=ckpt_slug,
         no_video=no_video,
         local_save_path=local_save_path,
+        output_dir=output_dir,
     )
     result = spawn_modal_function(
         eval_run,
@@ -155,6 +163,7 @@ def main(
         ckpt_slug=ckpt_slug,
         record_video=not no_video,
         invoke_command=invoke_command,
+        output_dir=output_dir,
     )
 
     print("\n--- eval_run result ---")

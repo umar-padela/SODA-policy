@@ -22,17 +22,24 @@ from pathlib import Path
 import numpy as np
 import modal
 
-sys.path.insert(0, str(Path(__file__).parents[4] / "modal"))
+try:
+    sys.path.insert(0, str(Path(__file__).parents[4] / "modal"))
+except IndexError:
+    sys.path.insert(0, "/root/soda-policy/modal")
 
 from modal_config import app, rollout_hierarchical, volume, image, EXPERIMENTS_MOUNT  # noqa: E402
 from soda.experiments.paths import MODAL_VOLUME_NAME, volume_relative_path  # noqa: E402
 
 HIGH_CHECKPOINT = (
-    "/experiments/pusht/train_high_conditioned_prev_option/best.ckpt"
+    "/experiments/final_experiments/pusht/high_study/high_starts_prev_opt/best.ckpt"
 )
+# Best policy from termination study: k=9 epoch 450, duration termination
+DEFAULT_LOW_CHECKPOINT = "/experiments/final_experiments/pusht/kernel_size_study/k9/epoch_0450.ckpt"
+DEFAULT_CONFIG = "configs/pusht/exp_k9_no_beta.yaml"
+
 N_EPISODES = 50
 TEST_START_SEED = 100000
-N_ACTION_STEPS_VALUES = [2, 4, 6, 8, 10, 16]
+N_ACTION_STEPS_VALUES = [2, 4, 6, 8, 12, 16]
 
 OUTPUT_PATH = Path(
     "experiments/final_experiments/pusht/receding_horizon_study/n_action_steps_sweep/sweep_results.json"
@@ -40,6 +47,36 @@ OUTPUT_PATH = Path(
 VOLUME_OUTPUT_PATH = (
     f"{EXPERIMENTS_MOUNT}/final_experiments/pusht/receding_horizon_study/n_action_steps_sweep/sweep_results.json"
 )
+LOCAL_DEBUG_DIR = Path(
+    "experiments/final_experiments/pusht/receding_horizon_study/n_action_steps_sweep/debug_videos"
+)
+
+
+def _download_worst_videos(vol: modal.Volume, sweep_results: dict, n_worst: int = 5) -> None:
+    # sweep_results is flat: {label: {per_episode_scores, ...}} — no epoch dimension
+    downloaded = 0
+    for label, r in sweep_results.items():
+        scores = r.get("per_episode_scores", [])
+        if not scores:
+            continue
+        worst = [i for i, _ in sorted(enumerate(scores), key=lambda x: x[1])[:n_worst]]
+        vol_base = f"final_experiments/pusht/receding_horizon_study/debug_videos/{label}"
+        out_dir = LOCAL_DEBUG_DIR / label
+        out_dir.mkdir(parents=True, exist_ok=True)
+        for ep_idx in worst:
+            seed = TEST_START_SEED + ep_idx
+            fname = f"ep{ep_idx:04d}_seed{seed}.mp4"
+            out_file = out_dir / fname
+            if out_file.exists():
+                continue
+            try:
+                data = b"".join(vol.read_file(volume_relative_path(f"/experiments/{vol_base}/{fname}")))
+                out_file.write_bytes(data)
+                print(f"  {label}/{fname}  ({scores[ep_idx]:.1f}%)")
+                downloaded += 1
+            except Exception:
+                pass
+    print(f"  {downloaded} video(s) → {LOCAL_DEBUG_DIR}")
 
 
 def _run_plot(output_path: Path) -> None:
@@ -98,7 +135,7 @@ def _print_summary(sweep_results: dict) -> None:
 @app.function(
     image=image,
     gpu=None,
-    timeout=7200,
+    timeout=86400,
     volumes={EXPERIMENTS_MOUNT: volume},
 )
 def _eval_aggregate_n_action_steps(
@@ -107,70 +144,83 @@ def _eval_aggregate_n_action_steps(
     low_checkpoint: str,
     config: str,
     n_episodes: int,
+    max_concurrent: int = 4,
 ) -> dict:
-    """Spawn rollouts for each n_action_steps, collect results, save to volume."""
+    """Spawn rollouts in batches, collect results, save to volume after each."""
     import json
     import numpy as np
     from pathlib import Path
-
-    calls = []
-    for item in work_items:
-        if item["label"] == "open_loop":
-            call = rollout_hierarchical.spawn(
-                config_path=config,
-                high_checkpoint=HIGH_CHECKPOINT,
-                low_checkpoint=low_checkpoint,
-                n_episodes=n_episodes,
-                test_start_seed=TEST_START_SEED,
-                n_action_steps=8,
-                duration_termination=False,
-                open_loop=True,
-                max_steps=300,
-                no_video=True,
-            )
-        else:
-            call = rollout_hierarchical.spawn(
-                config_path=config,
-                high_checkpoint=HIGH_CHECKPOINT,
-                low_checkpoint=low_checkpoint,
-                n_episodes=n_episodes,
-                test_start_seed=TEST_START_SEED,
-                n_action_steps=item["n_action_steps"],
-                duration_termination=True,
-                open_loop=False,
-                max_steps=300,
-                no_video=True,
-            )
-        calls.append((item, call))
-
-    print(f"Spawned {len(calls)} rollout jobs. Collecting results...")
 
     sweep_results = dict(existing)
 
     vol_path = Path(VOLUME_OUTPUT_PATH)
     vol_path.parent.mkdir(parents=True, exist_ok=True)
 
-    for item, call in calls:
-        result = call.get()
-        episodes = result.get("episodes") or []
-        scores = [ep["metrics"].get("max_overlap_full", 0.0) for ep in episodes]
-        mean_score = float(np.mean(scores)) if scores else 0.0
-        std_score = float(np.std(scores)) if scores else 0.0
-        label = item["label"]
-        sweep_results[label] = {
-            "n_action_steps": item.get("n_action_steps"),
-            "label": label,
-            "mean_score": mean_score,
-            "std_score": std_score,
-            "n_episodes": len(scores),
-            "per_episode_scores": scores,
-            "low_checkpoint": low_checkpoint,
-        }
-        print(f"  {label:>10}: mean={mean_score:.4f}  std={std_score:.4f}")
+    for batch_start in range(0, len(work_items), max_concurrent):
+        batch = work_items[batch_start:batch_start + max_concurrent]
+        calls = []
+        for item in batch:
+            debug_video_dir = (
+                f"/experiments/final_experiments/pusht/receding_horizon_study"
+                f"/debug_videos/{item['label']}"
+            )
+            if item["label"] == "open_loop":
+                call = rollout_hierarchical.spawn(
+                    config_path=config,
+                    high_checkpoint=HIGH_CHECKPOINT,
+                    low_checkpoint=low_checkpoint,
+                    n_episodes=n_episodes,
+                    test_start_seed=TEST_START_SEED,
+                    n_action_steps=8,
+                    duration_termination=False,
+                    open_loop=True,
+                    max_steps=300,
+                    no_video=False,
+                    output_dir=debug_video_dir,
+                )
+            else:
+                call = rollout_hierarchical.spawn(
+                    config_path=config,
+                    high_checkpoint=HIGH_CHECKPOINT,
+                    low_checkpoint=low_checkpoint,
+                    n_episodes=n_episodes,
+                    test_start_seed=TEST_START_SEED,
+                    n_action_steps=item["n_action_steps"],
+                    duration_termination=True,
+                    open_loop=False,
+                    max_steps=300,
+                    no_video=False,
+                    output_dir=debug_video_dir,
+                )
+            calls.append((item, call))
 
-        # Save after every result — crash-safe
-        vol_path.write_text(json.dumps(sweep_results, indent=2))
-        volume.commit()
+        print(f"Spawned batch of {len(calls)} rollout jobs (items {batch_start+1}–{batch_start+len(calls)} of {len(work_items)}). Collecting...")
+
+        for item, call in calls:
+            label = item["label"]
+            try:
+                result = call.get()
+            except Exception as e:
+                print(f"  {label:>10}: FAILED ({e}) — skipping")
+                continue
+            episodes = result.get("episodes") or []
+            scores = [ep["metrics"].get("max_overlap_full", 0.0) for ep in episodes]
+            mean_score = float(np.mean(scores)) if scores else 0.0
+            std_score = float(np.std(scores)) if scores else 0.0
+            sweep_results[label] = {
+                "n_action_steps": item.get("n_action_steps"),
+                "label": label,
+                "mean_score": mean_score,
+                "std_score": std_score,
+                "n_episodes": len(scores),
+                "per_episode_scores": scores,
+                "low_checkpoint": low_checkpoint,
+            }
+            print(f"  {label:>10}: mean={mean_score:.4f}  std={std_score:.4f}")
+
+            # Save after every result — crash-safe
+            vol_path.write_text(json.dumps(sweep_results, indent=2))
+            volume.commit()
 
     print(f"Saved to volume → {VOLUME_OUTPUT_PATH}")
     return sweep_results
@@ -178,25 +228,39 @@ def _eval_aggregate_n_action_steps(
 
 @app.local_entrypoint()
 def main(
-    low_checkpoint: str,
-    config: str,
+    low_checkpoint: str = DEFAULT_LOW_CHECKPOINT,
+    config: str = DEFAULT_CONFIG,
     n_episodes: int = N_EPISODES,
+    download_only: bool = False,
+    max_concurrent: int = 4,
 ) -> None:
     """
-    Sweep n_action_steps on the best SODA checkpoint from termination_study.
+    Sweep n_action_steps on the best policy from termination_study.
+
+    Defaults to k=9 epoch 450 (duration termination) — the best overall policy.
+    Override with --low-checkpoint and --config if evaluating a different checkpoint.
 
     Parameters
     ----------
     low_checkpoint
-        Volume path to the best low policy checkpoint from termination_study.
+        Volume path to the low policy checkpoint.
     config
         Config yaml matching the checkpoint.
     n_episodes
         Episodes per eval (default 50).
+    download_only
+        Skip eval — just download latest results + worst videos and regenerate plots.
     """
     vol = modal.Volume.from_name(MODAL_VOLUME_NAME)
 
     sweep_results = _load_existing(vol)
+
+    if download_only:
+        _print_summary(sweep_results)
+        _download_from_volume(vol)
+        _download_worst_videos(vol, sweep_results)
+        _run_plot(OUTPUT_PATH)
+        return
 
     print(f"Sweeping n_action_steps on: {low_checkpoint}")
     print(f"Config: {config}")
@@ -218,15 +282,17 @@ def main(
         print("\nNo new configs to evaluate.")
         _print_summary(sweep_results)
         _download_from_volume(vol)
+        _download_worst_videos(vol, sweep_results)
         _run_plot(OUTPUT_PATH)
         return
 
     print(f"\nSubmitting {len(work_items)} eval jobs to Modal aggregator...")
     print("Safe to close terminal with --detach; results saved to Modal Volume automatically.")
 
-    agg_call = _eval_aggregate_n_action_steps.spawn(work_items, sweep_results, low_checkpoint, config, n_episodes)
+    agg_call = _eval_aggregate_n_action_steps.spawn(work_items, sweep_results, low_checkpoint, config, n_episodes, max_concurrent)
     result = agg_call.get()
 
     _print_summary(result)
     _download_from_volume(vol)
+    _download_worst_videos(vol, result)
     _run_plot(OUTPUT_PATH)

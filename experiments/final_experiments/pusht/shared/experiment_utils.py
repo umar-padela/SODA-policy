@@ -40,7 +40,7 @@ class EvalResult:
 
 
 def load_eval_result(path: str | Path) -> EvalResult:
-    """Load a single summary.json → EvalResult."""
+    """Load a single summary.json -> EvalResult."""
     with open(path) as f:
         d = json.load(f)
     return EvalResult(
@@ -58,7 +58,7 @@ def load_eval_result(path: str | Path) -> EvalResult:
 
 
 def save_eval_result(result: EvalResult, path: str | Path) -> None:
-    """Write EvalResult → summary.json."""
+    """Write EvalResult -> summary.json."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w") as f:
@@ -81,7 +81,7 @@ def save_sweep_results(
     results: dict[str, list[EvalResult]],
     path: str | Path,
 ) -> None:
-    """Save {run_label: [EvalResult]} → JSON for easy replotting."""
+    """Save {run_label: [EvalResult]} -> JSON for easy replotting."""
     serializable = {
         label: [r.to_dict() for r in run_results]
         for label, run_results in results.items()
@@ -90,7 +90,7 @@ def save_sweep_results(
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w") as f:
         json.dump(serializable, f, indent=2)
-    print(f"Saved sweep results → {path}")
+    print(f"Saved sweep results -> {path}")
 
 
 def load_sweep_results(path: str | Path) -> dict[str, list[EvalResult]]:
@@ -106,6 +106,37 @@ def load_sweep_results(path: str | Path) -> dict[str, list[EvalResult]]:
 
 
 # ---------------------------------------------------------------------------
+# Termination study visual encoding (shared across all termination plot scripts)
+# ---------------------------------------------------------------------------
+
+BOTTLENECK_COLOR = "#1f77b4"   # blue   — all bottleneck variants
+OBS_COLOR        = "#ff7f0e"   # orange — all obs variants
+BOTH_COLOR       = "#2ca02c"   # green  — both (obs + bottleneck combined)
+
+
+def term_run_style(color: str, linestyle: str, marker: str, filled: bool) -> dict:
+    """Canonical matplotlib plot kwargs for termination study visual encoding.
+
+    Color     = feature type  (bottleneck=blue, obs=orange).
+    Linestyle = signal type   (completion=solid, completion+escape=dashed).
+    Marker    = feature type  (bottleneck=circle 'o', obs=square 's').
+    Fill      = action source (expert=filled, DDIM-5=hollow).
+    """
+    kw: dict = {
+        "color":     color,
+        "linestyle": linestyle,
+        "marker":    marker,
+        "linewidth": 1.8,
+        "markersize": 6,
+    }
+    if not filled:
+        kw["markerfacecolor"] = "none"
+        kw["markeredgecolor"] = color
+        kw["markeredgewidth"] = 1.5
+    return kw
+
+
+# ---------------------------------------------------------------------------
 # Plotting
 # ---------------------------------------------------------------------------
 
@@ -118,8 +149,16 @@ def _draw_eval_curve(
     std_key: str = "std_score",
     epoch_key: str = "epoch",
     use_evalresult: bool = True,
+    show_bands: bool = True,
+    origin: tuple[int, float] | None = None,
+    styles: dict[str, dict] | None = None,
 ) -> None:
-    """Internal: draw lines into an existing axes. Works with EvalResult or raw dicts."""
+    """Internal: draw lines into an existing axes. Works with EvalResult or raw dicts.
+
+    origin: if given as (epoch, score), prepends a shared starting point to every run.
+    styles: optional dict mapping run label -> extra matplotlib plot kwargs (color,
+            linestyle, marker, markerfacecolor, etc.).  Per-label keys override defaults.
+    """
     for label, results in runs.items():
         if not results:
             continue
@@ -136,14 +175,22 @@ def _draw_eval_curve(
             means = [r[score_key] for r in filtered]
             stds = [r.get(std_key, 0.0) for r in filtered]
 
-        line = ax.plot(epochs, means, marker="o", label=label)[0]
-        ax.fill_between(
-            epochs,
-            [m - s for m, s in zip(means, stds)],
-            [m + s for m, s in zip(means, stds)],
-            alpha=0.2,
-            color=line.get_color(),
-        )
+        if origin is not None:
+            epochs = [origin[0]] + epochs
+            means  = [origin[1]] + means
+            stds   = [0.0]       + stds
+
+        plot_kw: dict = {"marker": "o", "linewidth": 1.8, "markersize": 6}
+        plot_kw.update((styles or {}).get(label, {}))
+        line = ax.plot(epochs, means, label=label, **plot_kw)[0]
+        if show_bands:
+            ax.fill_between(
+                epochs,
+                [m - s for m, s in zip(means, stds)],
+                [m + s for m, s in zip(means, stds)],
+                alpha=0.2,
+                color=line.get_color(),
+            )
 
 
 def plot_eval_curve(
@@ -152,27 +199,58 @@ def plot_eval_curve(
     *,
     title: str | None = None,
     xlabel: str = "Epoch",
-    ylabel: str = "Mean Max Overlap (%)",
+    ylabel: str = "Mean Max Overlap (%, t≤300, 50ep)",
     figsize: tuple[float, float] = (8, 5),
     show: bool = False,
+    hlines: dict[str, float] | None = None,
+    legend_title: str | None = None,
+    legend_outside_bottom: bool = False,
+    legend_ncols: int = 1,
+    show_bands: bool = False,
+    origin: tuple[int, float] | None = None,
+    xlim_left: float | None = None,
+    styles: dict[str, dict] | None = None,
+    ylim: tuple[float, float] = (0, 100),
 ) -> None:
-    """Line plot: mean_score ± std_score vs epoch for multiple runs."""
+    """Line plot: mean_score ± std_score vs epoch for multiple runs.
+
+    hlines: optional dict of {label: mean_score} drawn as dashed horizontal baselines.
+    legend_title: optional title shown above the legend.
+    legend_outside_bottom: place legend below the axes, left-aligned.
+    legend_ncols: columns in the outside-bottom legend.
+    show_bands: set True to show ±std shaded bands.
+    origin: if given as (epoch, score), all runs share this starting point (fine-tuning plots).
+    xlim_left: if set, pin the x-axis left edge (e.g. 0 so a baseline hline shows from epoch 0).
+    styles: optional dict mapping run label -> matplotlib plot kwargs (see term_run_style).
+    ylim: y-axis (bottom, top). Default (0, 100). Use e.g. (65, 100) for termination study.
+    """
     import matplotlib.pyplot as plt
 
     fig, ax = plt.subplots(figsize=figsize)
-    _draw_eval_curve(ax, runs, use_evalresult=True)
+    _draw_eval_curve(ax, runs, use_evalresult=True, show_bands=show_bands, origin=origin, styles=styles)
+    if hlines:
+        for label, val in hlines.items():
+            ax.axhline(val, linestyle="--", linewidth=1.5, color="gray", label=label)
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
     if title:
         ax.set_title(title)
-    ax.legend()
+    if legend_outside_bottom:
+        ax.legend(title=legend_title, loc="upper center", bbox_to_anchor=(0.5, -0.15),
+                  fontsize=9, ncol=legend_ncols, borderaxespad=0)
+    else:
+        ax.legend(title=legend_title)
     ax.grid(True, alpha=0.3)
-    ax.set_ylim(0, 100)
+    ax.set_ylim(*ylim)
+    if origin is not None:
+        ax.set_xlim(left=0)
+    if xlim_left is not None:
+        ax.set_xlim(left=xlim_left)
 
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, dpi=150, bbox_inches="tight")
-    print(f"Saved plot → {output_path}")
+    print(f"Saved plot -> {output_path}")
     if show:
         plt.show()
     plt.close(fig)
@@ -189,6 +267,7 @@ def plot_eval_curve_from_dicts(
     figsize: tuple[float, float] = (8, 5),
     show: bool = False,
     ax=None,
+    ylim: tuple[float, float] = (0, 100),
 ) -> None:
     """
     Line plot using raw result dicts, supporting arbitrary score keys
@@ -207,13 +286,13 @@ def plot_eval_curve_from_dicts(
     ax.set_ylabel(ylabel)
     ax.legend(fontsize=8)
     ax.grid(True, alpha=0.3)
-    ax.set_ylim(0, 100)
+    ax.set_ylim(*ylim)
 
     if own_fig and output_path is not None:
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(output_path, dpi=150, bbox_inches="tight")
-        print(f"Saved plot → {output_path}")
+        print(f"Saved plot -> {output_path}")
         if show:
             plt.show()
         plt.close(fig)
@@ -227,6 +306,7 @@ def plot_multi_horizon_grid(
     ncols: int = 3,
     figsize_per_cell: tuple[float, float] = (5, 3.8),
     show: bool = False,
+    ylim: tuple[float, float] = (0, 100),
 ) -> None:
     """
     Grid of subplots, one per time horizon. Each subplot shows mean max overlap
@@ -255,7 +335,7 @@ def plot_multi_horizon_grid(
         ax.set_ylabel(f"Max Overlap (%, t≤{t})", fontsize=9)
         ax.set_title(f"t ≤ {t}", fontsize=10)
         ax.grid(True, alpha=0.3)
-        ax.set_ylim(0, 100)
+        ax.set_ylim(*ylim)
         ax.tick_params(labelsize=8)
 
         # Only show legend on first cell
@@ -275,7 +355,7 @@ def plot_multi_horizon_grid(
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, dpi=150, bbox_inches="tight")
-    print(f"Saved plot → {output_path}")
+    print(f"Saved plot -> {output_path}")
     if show:
         plt.show()
     plt.close(fig)
@@ -286,11 +366,17 @@ def plot_bar_comparison(
     output_path: str | Path,
     *,
     title: str | None = None,
-    ylabel: str = "Mean Max Overlap (%)",
+    ylabel: str = "Mean Max Overlap (%, t≤300, 50ep)",
     figsize: tuple[float, float] = (8, 5),
     show: bool = False,
+    hlines: dict[str, float] | None = None,
+    legend_title: str | None = None,
 ) -> None:
-    """Bar chart: one bar per run label, height = mean_score, error bar = std_score."""
+    """Bar chart: one bar per run label, height = mean_score, error bar = std_score.
+
+    hlines: optional dict of {label: mean_score} drawn as dashed horizontal baselines.
+    legend_title: optional title shown above the legend (only shown when hlines are present).
+    """
     import matplotlib.pyplot as plt
     import numpy as np
 
@@ -311,6 +397,11 @@ def plot_bar_comparison(
             ha="center", va="bottom", fontsize=9,
         )
 
+    if hlines:
+        for label, val in hlines.items():
+            ax.axhline(val, linestyle="--", linewidth=1.5, color="gray", label=label)
+        ax.legend(fontsize=8, title=legend_title)
+
     ax.set_xticks(x)
     ax.set_xticklabels(labels, rotation=20, ha="right")
     ax.set_ylabel(ylabel)
@@ -322,7 +413,7 @@ def plot_bar_comparison(
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, dpi=150, bbox_inches="tight")
-    print(f"Saved plot → {output_path}")
+    print(f"Saved plot -> {output_path}")
     if show:
         plt.show()
     plt.close(fig)

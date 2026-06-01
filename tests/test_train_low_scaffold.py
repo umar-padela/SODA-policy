@@ -44,7 +44,6 @@ def _minimal_train_low_block(**overrides) -> dict:
         "lr_plateau_factor": 0.5,
         "lr_plateau_min_lr": 1e-6,
         "beta_stratified_batches": False,
-        "two_phase": False,
         "num_epochs": 3,
         "lr": 2e-4,
         "lr_warmup_epochs": 0,

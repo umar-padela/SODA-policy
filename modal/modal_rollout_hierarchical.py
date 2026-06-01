@@ -87,6 +87,7 @@ def _build_invoke_command(
     max_steps: int,
     output_dir: str | None,
     no_video: bool,
+    video_failure_threshold: float | None,
     local_save_path: str | None,
 ) -> str:
     parts = [
@@ -116,6 +117,8 @@ def _build_invoke_command(
         parts.append(f"--output-dir {output_dir}")
     if no_video:
         parts.append("--no-video")
+    if video_failure_threshold != 20.0:
+        parts.append(f"--video-failure-threshold {video_failure_threshold}")
     if local_save_path:
         parts.append(f"--local-save-path {local_save_path}")
     return " ".join(parts)
@@ -136,6 +139,7 @@ def main(
     max_steps: int = 300,
     output_dir: str | None = None,
     no_video: bool = False,
+    video_failure_threshold: float | None = 20.0,
     local_save_path: str | None = None,
 ):
     """
@@ -162,6 +166,8 @@ def main(
         β is disabled. Each "segment" = one diffusion plan fully executed, then π_high picks next skill.
     max_steps
         Episode step budget (default 300, matching Columbia eval).
+    video_failure_threshold
+        Save video only for episodes scoring below this % (default 20.0). Set to None to save all.
     local_save_path
         If set, download MP4s and JSONs to this local directory after rollout.
     """
@@ -179,6 +185,7 @@ def main(
         max_steps=max_steps,
         output_dir=output_dir,
         no_video=no_video,
+        video_failure_threshold=video_failure_threshold,
         local_save_path=local_save_path,
     )
 
@@ -197,6 +204,7 @@ def main(
         max_steps=max_steps,
         output_dir=output_dir,
         no_video=no_video,
+        video_failure_threshold=video_failure_threshold,
         invoke_command=invoke_command,
     )
 

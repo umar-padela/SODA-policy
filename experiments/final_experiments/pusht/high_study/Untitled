@@ -1,0 +1,1 @@
+conda run -n soda modal run modal/modal_copy_high_checkpoints.py

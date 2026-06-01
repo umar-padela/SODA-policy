@@ -1,0 +1,111 @@
+# π_high training config — segment-start observations, prev-option conditioning, ImageNet-init ResNet.
+#
+# Trains the high-level option classifier on segment-start frames only, conditioned on the
+# previous option embedding. Use this to retrain the existing π_high approach from scratch.
+#
+# Training command:
+#   modal run modal/modal_train_high.py --config-name high_starts_prev_opt \
+#     --low-checkpoint /experiments/pusht/train_low/<run>/best.ckpt
+
+name: high_starts_prev_opt
+
+# --- Shared layout ---
+n_obs_steps: 2
+n_action_steps: 8
+horizon: null
+past_action_visible: false
+obs_as_global_cond: true
+
+task:
+  name: pusht_image
+  env_runner:
+    legacy_test: true
+    test_start_seed: 100000
+    max_steps: 300
+    fps: 10
+    crf: 22
+    render_size: 96
+    tqdm_interval_sec: 5.0
+  dataset:
+    zarr_path: data/raw/pusht/pusht.zarr
+    option_id_key: option_id_supervised
+    val_ratio: 0.1
+    seed: 42
+    min_segment_len: 5
+    num_workers: 8
+    anchor_cut_last_n: 8    # multi-anchor aug: train on all segment frames except last 8
+
+# --- π_high architecture ---
+high_policy:
+  num_options: null
+  global_feat_dim: null
+  hidden_dim: 256
+  num_layers: 2
+  condition_on_prev_option: true
+  prev_option_embed_dim: 32
+
+# --- DP backbone architecture (obs encoder is shared; low policy not trained here) ---
+policy:
+  crop_shape: [84, 84]
+  num_inference_steps: 100
+  diffusion_step_embed_dim: 128
+  down_dims: [512, 1024, 2048]
+  kernel_size: 9
+  n_groups: 8
+  cond_predict_scale: true
+  eval_fixed_crop: true
+  obs_encoder_group_norm: true
+
+noise_scheduler:
+  num_train_timesteps: 100
+  beta_start: 0.0001
+  beta_end: 0.02
+  beta_schedule: squaredcos_cap_v2
+  clip_sample: true
+  prediction_type: epsilon
+  variance_type: fixed_small
+
+# --- π_high training ---
+train_high:
+  device: cuda:0
+  seed: 42
+  num_epochs: 1000
+  batch_size: 64
+  lr: 1.0e-4
+  weight_decay: 1.0e-5
+  checkpoint_every: 5
+  output_dir: null
+  wandb_enabled: true
+  wandb_project: soda-train-high
+  wandb_run_name: null
+  wandb_group: null
+  wandb_tags: []
+  low_checkpoint: null      # REQUIRED: pass --low-checkpoint on CLI, or set dp_checkpoint below
+  dp_checkpoint: /experiments/dp_baselines/pusht_image_cnn_train0/latest.ckpt
+  num_workers: 4
+  option_balance: none
+  use_ema: true
+  lr_warmup_epochs: 5
+  freeze_obs_encoder: false
+  backbone_lr: 1.0e-4
+  dropout_rate: 0.3
+  label_smoothing: 0.1      # CE label smoothing; prevents logit explosion on easy training examples
+  imagenet_init: true       # ImageNet-only ResNet init; no Push-T DP features preserved
+  train_on_all_frames: false  # segment-start frames only (OptionStartDataset)
+
+# --- Inference (fill after training) ---
+inference:
+  beta_transition: 0.9
+  beta_diffusion_t: 0
+  high_checkpoint: null
+  low_checkpoint: null
+
+eval:
+  wandb_enabled: true
+  wandb_project: soda-eval
+  policy: soda
+  record_video: true
+  smoke:
+    n_test: 5
+  full:
+    n_test: 50

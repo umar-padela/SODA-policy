@@ -189,6 +189,7 @@ def run_hierarchical_rollouts(
     output_dir: Path | None = None,
     record_video: bool = True,
     video_overlap_threshold: float | None = None,
+    external_beta: Any | None = None,
 ) -> list[HierarchicalEpisodeResult]:
     """
     Load SODA hierarchical policy and roll out ``n_episodes`` seeded episodes.
@@ -198,15 +199,54 @@ def run_hierarchical_rollouts(
     ``open_loop=True``: π_high resamples ω after every full native chunk; β disabled.
     ``duration_termination=True``: π_high resamples ω when duration channel predicts
     the current skill is done (predicted native_len < n_action_steps); β disabled.
+    ``external_beta``: if provided, wired into HierarchicalPolicy as the termination
+    signal instead of π_low's internal β head (used for stage4 standalone beta eval).
     """
     from dataclasses import replace as dc_replace
 
-    policy, _settings, cfg = load_soda_policy_and_cfg(
-        device=device,
-        config_name=config_path.stem,
-        high_checkpoint=high_checkpoint,
-        low_checkpoint=low_checkpoint,
-    )
+    if external_beta is not None:
+        import torch as _torch
+        from soda.eval.policy_loaders import (
+            load_high_policy_from_checkpoint,
+            load_low_policy_from_checkpoint,
+            load_soda_eval_cfg,
+            _settings_from_cfg,
+        )
+        from soda.inference.hierarchical_controller import (
+            HierarchicalPolicy,
+            HierarchicalPolicyConfig,
+        )
+
+        cfg = load_soda_eval_cfg(config_path.stem)
+        infer_cfg = getattr(cfg, "inference", None)
+        beta_t = float(
+            beta_transition if beta_transition is not None
+            else (infer_cfg.beta_transition if infer_cfg is not None else 0.92)
+        )
+        pi_high = load_high_policy_from_checkpoint(high_checkpoint, device=device, eval_cfg=cfg)
+        pi_low = load_low_policy_from_checkpoint(low_checkpoint, device=device, eval_cfg=cfg)
+        option_key = str(cfg.task.dataset.get("option_id_key", "option_id_supervised"))
+        policy = HierarchicalPolicy(
+            device=_torch.device(device),
+            config=HierarchicalPolicyConfig(
+                config_name=config_path.stem,
+                option_id_key=option_key,
+                beta_transition=beta_t,
+                use_external_beta=True,
+            ),
+            pi_high=pi_high,
+            pi_low=pi_low,
+            external_beta=external_beta,
+        )
+        policy.dtype = getattr(pi_low, "dtype", _torch.float32)
+        _settings = _settings_from_cfg(cfg, policy_horizon=int(pi_low.horizon))
+    else:
+        policy, _settings, cfg = load_soda_policy_and_cfg(
+            device=device,
+            config_name=config_path.stem,
+            high_checkpoint=high_checkpoint,
+            low_checkpoint=low_checkpoint,
+        )
 
     # Override n_action_steps from caller (load_soda_policy_and_cfg uses yaml default)
     policy.config = dc_replace(policy.config, n_action_steps=n_action_steps)

@@ -18,6 +18,7 @@ DP_PUSHT_IMAGE_TRAIN0_BASE = (
     "image/pusht/diffusion_policy_cnn/train_0/checkpoints"
 )
 DP_PUSHT_IMAGE_TRAIN0_LATEST_URL = f"{DP_PUSHT_IMAGE_TRAIN0_BASE}/latest.ckpt"
+DP_PUSHT_IMAGE_TRAIN0_BEST_URL   = f"{DP_PUSHT_IMAGE_TRAIN0_BASE}/epoch%3D0500-test_mean_score%3D0.884.ckpt"
 
 from soda.experiments.paths import frozen_dp_pusht_checkpoint
 
@@ -30,8 +31,13 @@ def ensure_dp_checkpoint(
     dest_path: Path,
     *,
     download: bool = True,
+    url: str | None = None,
 ) -> Path:
-    """Return path to frozen Push-T image checkpoint, downloading if needed."""
+    """Return path to frozen Push-T image checkpoint, downloading if needed.
+
+    url: override the download URL. Defaults to latest.ckpt.
+         Pass DP_PUSHT_IMAGE_TRAIN0_BEST_URL to fetch best.ckpt instead.
+    """
     dest_path = Path(dest_path)
     if dest_path.is_file() and dest_path.stat().st_size > 1_000_000:
         return dest_path
@@ -39,11 +45,11 @@ def ensure_dp_checkpoint(
     if not download:
         raise FileNotFoundError(f"Checkpoint not found: {dest_path}")
 
-    url = DP_PUSHT_IMAGE_TRAIN0_LATEST_URL
+    download_url = url or DP_PUSHT_IMAGE_TRAIN0_LATEST_URL
     dest_path.parent.mkdir(parents=True, exist_ok=True)
-    print(f"Downloading DP checkpoint (~3 GB) from:\n  {url}\n  -> {dest_path}")
+    print(f"Downloading DP checkpoint (~3 GB) from:\n  {download_url}\n  -> {dest_path}")
     subprocess.run(
-        ["wget", "-q", "--show-progress", "-O", str(dest_path), url],
+        ["wget", "-q", "--show-progress", "-O", str(dest_path), download_url],
         check=True,
     )
     if not dest_path.is_file():

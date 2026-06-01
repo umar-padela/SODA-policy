@@ -2,16 +2,14 @@
 Train obs_positive and obs_positive_negative in parallel — termination_study stage 1b.
 
 Both runs: 100 epochs, frozen backbone, only β MLP trains.
-Starts from best kernel_size checkpoint (set --base-checkpoint).
+Warmstart checkpoint is set in each config file (exp_term_obs_*.yaml).
 
 obs_positive      — completion signal only (β=1 at last frame of each segment)
-obs_positive_negative — completion + escape signal (β=1 at last frame AND when
-                      option_id replaced with wrong option, p=0.5)
+obs_positive_negative — completion + escape signal (expand-all: K-1 wrong-option examples per anchor)
 
 Usage (repo root):
   modal run --detach \\
     experiments/final_experiments/pusht/termination_study/stage1b_obs_signal/modal_train_stage1b.py \\
-    --base-checkpoint /experiments/final_experiments/pusht/kernel_size_study/k{N}/best.ckpt \\
     --run-readme "termination_study stage1b obs signal comparison"
 
 Checkpoints saved to:
@@ -41,19 +39,15 @@ ALL_RUNS = [
 
 
 @app.local_entrypoint()
-def main(base_checkpoint: str, run_readme: str, runs: str = "") -> None:
+def main(
+    run_readme: str = "",
+    runs: str = "",
+) -> None:
     """
     Train stage 1b runs (in parallel by default).
 
-    Parameters
-    ----------
-    base_checkpoint
-        Volume path to the best checkpoint from kernel_size_study.
-    run_readme
-        Short description archived with each run.
-    runs
-        Comma-separated subset to train, e.g. --runs obs_positive.
-        Omit to train all runs in parallel.
+    Warmstart checkpoint is read from each config file — no CLI override needed.
+    Use --runs to select a subset, e.g. --runs obs_positive.
     """
     selected = {r.strip() for r in runs.split(",") if r.strip()} if runs else None
     configs = [
@@ -68,7 +62,6 @@ def main(base_checkpoint: str, run_readme: str, runs: str = "") -> None:
         output_dir = f"{OUTPUT_BASE}/{label}"
         hydra_overrides = [
             f"train_low.output_dir={output_dir}",
-            f"train_low.checkpoint={base_checkpoint}",
             f"train_low.wandb_run_name=term_stage1b_{label}",
         ]
         call = train_low.spawn(

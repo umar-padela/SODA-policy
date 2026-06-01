@@ -31,7 +31,7 @@ from modal_config import app, rollout_hierarchical, volume, image, EXPERIMENTS_M
 from soda.experiments.paths import MODAL_VOLUME_NAME, volume_relative_path  # noqa: E402
 
 HIGH_CHECKPOINT = (
-    "/experiments/pusht/train_high_conditioned_prev_option/best.ckpt"
+    "/experiments/final_experiments/pusht/high_study/high_starts_prev_opt/best.ckpt"
 )
 N_EPISODES = 50
 TEST_START_SEED = 100000
@@ -40,7 +40,7 @@ OUTPUT_PATH = Path(
     "experiments/final_experiments/pusht/termination_study/stage1b_obs_signal/stage1b_results.json"
 )
 VOLUME_OUTPUT_PATH = (
-    f"{EXPERIMENTS_MOUNT}/final_experiments/pusht/termination_study/stage1b_obs_signal/stage1b_results.json"
+    f"{EXPERIMENTS_MOUNT}/final_experiments/pusht/termination_study/stage1b/stage1b_results.json"
 )
 
 STAGE1B_RUNS = {
@@ -57,6 +57,65 @@ STAGE1B_RUNS = {
         "config": "configs/pusht/exp_term_bottleneck_ddim_positive_negative.yaml",
     },
 }
+
+
+LOCAL_DEBUG_DIR = Path(
+    "experiments/final_experiments/pusht/termination_study/stage1b_obs_signal/debug_videos"
+)
+N_WORST_VIDEOS = 5
+
+
+def _download_worst_videos(vol: modal.Volume, results: dict[str, list[dict]]) -> None:
+    """Download the N_WORST_VIDEOS worst-scoring debug videos per (run, epoch) locally.
+
+    Video filenames are deterministic: ep{i:04d}_seed{TEST_START_SEED+i}.mp4
+    Only downloads files that actually exist on the volume (score > threshold means no video saved).
+    """
+    downloaded = 0
+    for run_label, run_results in results.items():
+        for r in run_results:
+            epoch = r["epoch"]
+            scores = r.get("per_episode_scores", [])
+            if not scores:
+                continue
+
+            # Find indices of worst N scores
+            indexed = sorted(enumerate(scores), key=lambda x: x[1])
+            worst_indices = [i for i, _ in indexed[:N_WORST_VIDEOS]]
+
+            vol_base = (
+                f"final_experiments/pusht/termination_study/stage1b"
+                f"/debug_videos/{run_label}/epoch_{epoch:04d}"
+            )
+            local_base = LOCAL_DEBUG_DIR / run_label / f"epoch_{epoch:04d}"
+            local_base.mkdir(parents=True, exist_ok=True)
+
+            for ep_idx in worst_indices:
+                seed = TEST_START_SEED + ep_idx
+                fname = f"ep{ep_idx:04d}_seed{seed}.mp4"
+                vol_path = volume_relative_path(f"/experiments/{vol_base}/{fname}")
+                local_path = local_base / fname
+                if local_path.exists():
+                    continue
+                try:
+                    data = b"".join(vol.read_file(vol_path))
+                    local_path.write_bytes(data)
+                    score = scores[ep_idx]
+                    print(f"  downloaded: {local_path.name} (score={score:.1f}%)")
+                    downloaded += 1
+                except Exception:
+                    pass  # video not saved (score was above threshold)
+
+    print(f"Downloaded {downloaded} worst-{N_WORST_VIDEOS} debug video(s) → {LOCAL_DEBUG_DIR.resolve()}")
+
+
+def _run_plot(output_path: Path) -> None:
+    plot_script = Path(__file__).parent / "plot_stage1b.py"
+    if not plot_script.exists():
+        print(f"  (no plot script at {plot_script}, skipping)")
+        return
+    print(f"\nRunning {plot_script.name}...")
+    subprocess.run([sys.executable, str(plot_script), "--data", str(output_path)], check=False)
 
 
 def _load_existing(vol: modal.Volume) -> dict[str, list[dict]]:
@@ -125,7 +184,7 @@ def _print_summary(results: dict[str, list[dict]]) -> None:
 @app.function(
     image=image,
     gpu=None,
-    timeout=7200,
+    timeout=86400,
     volumes={EXPERIMENTS_MOUNT: volume},
 )
 def _eval_aggregate_stage1b(
@@ -140,6 +199,10 @@ def _eval_aggregate_stage1b(
 
     calls = []
     for item in work_items:
+        debug_video_dir = (
+            f"/experiments/final_experiments/pusht/termination_study/stage1b"
+            f"/debug_videos/{item['run_label']}/epoch_{item['epoch']:04d}"
+        )
         call = rollout_hierarchical.spawn(
             config_path=item["config"],
             high_checkpoint=HIGH_CHECKPOINT,
@@ -150,7 +213,8 @@ def _eval_aggregate_stage1b(
             duration_termination=False,
             open_loop=False,
             max_steps=300,
-            no_video=True,
+            no_video=False,
+            output_dir=debug_video_dir,
         )
         calls.append((item, call))
 
@@ -240,6 +304,8 @@ def main(n_action_steps: int = 8) -> None:
         print("No new checkpoints to evaluate.")
         _print_summary(stage1b_results)
         _download_from_volume(vol)
+        _download_worst_videos(vol, stage1b_results)
+        _run_plot(OUTPUT_PATH)
         return
 
     print(f"\nSubmitting {len(work_items)} eval jobs to Modal aggregator...")
@@ -252,4 +318,5 @@ def main(n_action_steps: int = 8) -> None:
     if result.get("winner"):
         print(f"\nWINNER: {result['winner']}")
     _download_from_volume(vol)
-    print("  (no plot script for stage1b; review stage1b_results.json manually)")
+    _download_worst_videos(vol, result["results"])
+    _run_plot(OUTPUT_PATH)

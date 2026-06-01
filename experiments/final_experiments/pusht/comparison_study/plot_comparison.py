@@ -44,7 +44,6 @@ def main() -> None:
     plot_bar_comparison(
         results,
         Path(args.data).parent / "plot_final_comparison.png",
-        title="Push-T: SODA Hierarchical Policy vs Diffusion Policy Baseline",
         figsize=(6, 5),
     )
 

@@ -1,0 +1,111 @@
+# ============================================================
+# Experiment: termination_study / stage 4 — Standalone ResNet β
+# Run: OBS_POSITIVE_NEGATIVE_STANDALONE
+#   Architecture: fresh ResNet18Conv (ImageNet init, fully trainable) + option embed + MLP
+#   Training signal: completion + escape (positive_negative / expand-all)
+#   Decoupled from diffusion: k=9/450-epoch LowPolicy used for obs normalizer only.
+#
+# Comparison baseline: obs_positive_negative (same signal, frozen DP obs encoder)
+# Research question: does a dedicated, free-to-adapt ResNet outperform a shared one?
+#
+# pos_weight: auto-calculated from dataset escape distribution
+#   K=3 options, avg_len≈17: pos_weight ≈ 0.46
+# label_smoothing: 0.05 — matches all other termination experiments
+# dropout_rate: 0.3 — matches all other termination experiments
+# ============================================================
+
+name: obs_positive_negative_standalone
+
+n_obs_steps: 2
+n_action_steps: 8
+horizon: null
+past_action_visible: false
+obs_as_global_cond: true
+
+task:
+  name: pusht_image
+  env_runner:
+    legacy_test: true
+    test_start_seed: 100000
+    max_steps: 300
+    fps: 10
+    crf: 22
+    render_size: 96
+    tqdm_interval_sec: 5.0
+  dataset:
+    zarr_path: data/raw/pusht/pusht.zarr
+    option_id_key: option_id_supervised
+    val_ratio: 0.1
+    seed: 42
+    min_segment_len: 3
+    num_workers: 4
+    anchor_cut_last_n: 0
+    escape_relabeling: true   # completion + escape (positive_negative expand-all)
+
+# Obs encoder architecture — must match k=9 training config for obs normalizer compatibility.
+# These values are read by _build_obs_encoder_architecture to build the MultiImageObsEncoder.
+policy:
+  kernel_size: 9
+  crop_shape: [84, 84]
+  num_inference_steps: 100
+  diffusion_step_embed_dim: 128
+  down_dims: [512, 1024, 2048]
+  n_groups: 8
+  cond_predict_scale: true
+  eval_fixed_crop: true
+  obs_encoder_group_norm: true
+
+# Standalone beta architecture config.
+# Matches termination_input=obs experiments: same ResNet, same MLP capacity.
+standalone_beta:
+  option_embed_dim: 32           # matches low_policy.option_embed_dim
+  n_obs_steps: 2
+  crop_shape: [84, 84]
+  obs_encoder_group_norm: true   # GroupNorm for batch=1 inference stability
+  hidden_dim: 256                # matches termination_head.hidden_dim in other term runs
+  num_layers: 2                  # matches termination_head.num_layers
+  dropout_rate: 0.3              # matches other termination experiments
+  use_chunk_cursor: false
+
+train_beta:
+  device: cuda:0
+  seed: 42
+  num_workers: 4
+  output_dir: null               # overridden by modal_train_stage4.py
+  run_readme: null
+  wandb_enabled: true
+  wandb_project: soda-final-experiments
+  wandb_run_name: null           # overridden by modal_train_stage4.py
+  wandb_group: termination_study_stage4
+  wandb_tags: [termination_study, stage4, standalone_beta, obs_positive_negative_standalone]
+  # Training
+  num_epochs: 100
+  batch_size: 64
+  lr: 1.0e-4                     # same as other termination experiments
+  weight_decay: 1.0e-6           # matches Columbia DP
+  checkpoint_every: 10
+  use_ema: true
+  best_checkpoint_metric: loss_termination   # provisional; rollout eval is authoritative
+  # Beta loss
+  beta_pos_weight: null          # auto-calculated from dataset class frequencies (~0.46)
+  label_smoothing: 0.05          # matches all other termination experiments
+  all_anchors: true              # required for escape_relabeling expand-all
+  # Source checkpoint — normalizer only, NOT model weights
+  checkpoint: /experiments/final_experiments/pusht/kernel_size_study/k9/epoch_0450.ckpt
+
+inference:
+  beta_transition: 0.92          # matches other beta termination eval runs
+  beta_diffusion_t: 0
+  high_checkpoint: /experiments/final_experiments/pusht/high_study/high_starts_prev_opt/best.ckpt
+  low_checkpoint: /experiments/final_experiments/pusht/kernel_size_study/k9/epoch_0450.ckpt
+  standalone_beta_checkpoint: null   # filled after training; used by modal_eval_stage4.py
+
+eval:
+  wandb_enabled: true
+  wandb_project: soda-final-experiments
+  policy: soda
+  record_video: true
+  smoke:
+    n_test: 5
+  full:
+    n_test: 50
