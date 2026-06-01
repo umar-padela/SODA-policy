@@ -1,5 +1,5 @@
 """
-Train SODA π_low + π_high on Block Pushing.
+Train SODA π_low + π_high on Block Push.
 
 Usage:
   # π_low (run first)
@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).parents[3] / "modal"))
 from modal_config import app, spawn_modal_function, train_low, train_high  # noqa: E402
 
 CONFIG_NAME = "soda_supervised"
-TASK        = "block_pushing"
+TASK        = "block_push"
 
 
 @app.local_entrypoint()

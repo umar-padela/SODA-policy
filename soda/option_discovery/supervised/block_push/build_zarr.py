@@ -1,5 +1,5 @@
 """
-Convert generated block_pushing npz episodes → zarr dataset.
+Convert generated block_push npz episodes → zarr dataset.
 
 Zarr schema matches Push-T exactly so all existing training/dataset code works:
   data/img                  (N, 96, 96, 3)  uint8
@@ -11,10 +11,10 @@ Zarr schema matches Push-T exactly so all existing training/dataset code works:
 Images are center-cropped to square then resized to 96×96.
 
 Usage (from repo root):
-  python soda/option_discovery/supervised/block_pushing/build_zarr.py
-  python soda/option_discovery/supervised/block_pushing/build_zarr.py \\
-      --npz-dir data/raw/block_pushing \\
-      --zarr-out data/raw/block_pushing/block_pushing.zarr
+  python soda/option_discovery/supervised/block_push/build_zarr.py
+  python soda/option_discovery/supervised/block_push/build_zarr.py \\
+      --npz-dir data/raw/block_push \\
+      --zarr-out data/raw/block_push/block_push.zarr
 """
 import argparse, os, glob
 import numpy as np
@@ -97,7 +97,7 @@ def build(npz_dir: str, zarr_out: str) -> None:
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
-    p.add_argument("--npz-dir",  default="data/raw/block_pushing")
-    p.add_argument("--zarr-out", default="data/raw/block_pushing/block_pushing.zarr")
+    p.add_argument("--npz-dir",  default="data/raw/block_push")
+    p.add_argument("--zarr-out", default="data/raw/block_push/block_push.zarr")
     args = p.parse_args()
     build(args.npz_dir, args.zarr_out)

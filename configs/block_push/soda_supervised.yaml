@@ -1,5 +1,5 @@
 # ============================================================
-# Block Pushing — SODA supervised (oracle labels, k=9)
+# Block Push — SODA supervised (oracle labels, k=9)
 # Mirrors exp_k9_no_beta pusht config; adapts task/data paths.
 # ============================================================
 
@@ -22,7 +22,7 @@ task:
     render_size: 96
     tqdm_interval_sec: 5.0
   dataset:
-    zarr_path: data/raw/block_pushing/block_pushing.zarr
+    zarr_path: data/raw/block_push/block_push.zarr
     option_id_key: option_id_supervised
     val_ratio: 0.1
     seed: 42
@@ -73,8 +73,8 @@ train_low:
   wandb_enabled: true
   wandb_project: soda-final-experiments
   wandb_run_name: null
-  wandb_group: block_pushing
-  wandb_tags: [block_pushing, k9, oracle_labels]
+  wandb_group: block_push
+  wandb_tags: [block_push, k9, oracle_labels]
   use_ema: true
   run_readme: null
   num_epochs: 500

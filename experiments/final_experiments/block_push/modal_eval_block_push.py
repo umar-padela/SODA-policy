@@ -1,5 +1,5 @@
 """
-Final eval: SODA vs DP baseline on Block Pushing.
+Final eval: SODA vs DP baseline on Block Push.
 
   modal run --detach experiments/final_experiments/block_push/modal_eval_block_push.py \\
       --soda-low-checkpoint  /experiments/train_low/pusht_block_push_soda_supervised/best.ckpt \\
@@ -26,7 +26,7 @@ N_EPISODES      = 50
 TEST_START_SEED = 100000
 OUTPUT_LOCAL    = Path("experiments/final_experiments/block_push/results.json")
 OUTPUT_VOLUME   = f"{EXPERIMENTS_MOUNT}/final_experiments/block_push/results.json"
-TASK            = "block_pushing"
+TASK            = "block_push"
 CONFIG_NAME     = "soda_supervised"
 
 

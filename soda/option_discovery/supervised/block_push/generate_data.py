@@ -1,7 +1,7 @@
 """
 Generate expert block pushing demonstrations with oracle labels.
 
-Saves N episodes to data/raw/block_pushing/ as individual .npz files.
+Saves N episodes to data/raw/block_push/ as individual .npz files.
 Each file contains: images (T,H,W,3), state (T,obs_dim), actions (T,2),
 option_id (T,) with labels 0-3.
 
@@ -13,7 +13,7 @@ Option mapping:
 
 Run from repo root:
   conda activate soda
-  python soda/option_discovery/supervised/block_pushing/generate_data.py --n-episodes 200
+  python soda/option_discovery/supervised/block_push/generate_data.py --n-episodes 200
 """
 import sys, os, types, argparse
 import numpy as np
@@ -190,7 +190,7 @@ if __name__ == "__main__":
     parser.add_argument("--n-episodes", type=int, default=200)
     parser.add_argument("--image-size", type=int, nargs=2, default=[240, 320],
                         metavar=("H", "W"))
-    parser.add_argument("--out-dir", default="data/raw/block_pushing")
+    parser.add_argument("--out-dir", default="data/raw/block_push")
     parser.add_argument("--max-steps", type=int, default=350)
     args = parser.parse_args()
 
