@@ -16,7 +16,12 @@ from pathlib import Path
 
 import modal
 
-sys.path.insert(0, str(Path(__file__).parent))
+# Works locally (running from repo root) AND inside the Modal container
+# where the repo is copied to /root/soda-policy/
+for _p in [str(Path(__file__).parent), "/root/soda-policy/modal"]:
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
 from modal_config import app, image, volume, EXPERIMENTS_MOUNT  # noqa: E402
 
 block_push_image = image  # pybullet is now in the base image
