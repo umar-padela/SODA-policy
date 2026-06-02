@@ -385,14 +385,22 @@ class HighPolicy(nn.Module):
         global_feat: torch.Tensor,
         *,
         prev_option_id: torch.Tensor | int | None = None,
+        exclude_option_id: int | None = None,
     ) -> torch.Tensor:
         """Argmax over classifier logits → ``(B,)`` int64 option id.
 
         When ``condition_on_prev_option=True``, pass ``prev_option_id`` (int or
         ``(B,)`` tensor).  ``None`` → null token (episode start).
+
+        ``exclude_option_id`` — if set, mask that option's logit to -inf so the
+        argmax selects the next-best option.  Useful to prevent the same option
+        from being re-selected immediately after a duration-termination exit.
         """
         classifier_input = self._build_classifier_input(global_feat, prev_option_id)
         logits = self.classifier(classifier_input)
+        if exclude_option_id is not None:
+            logits = logits.clone()
+            logits[:, exclude_option_id] = float("-inf")
         return logits.argmax(dim=-1)
 
     def forward(

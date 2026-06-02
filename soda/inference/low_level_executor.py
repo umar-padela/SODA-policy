@@ -28,6 +28,7 @@ class HierarchicalPolicyConfig:
     open_loop: bool = False           # resample ω from π_high after every full native chunk (β ignored)
     duration_termination: bool = False  # exit to π_high when duration channel predicts < n_action_steps remain (β ignored)
     use_external_beta: bool = False   # when True, LowLevelChunkExecutor uses external_beta_fn instead of pi_low.predict_beta
+    high_monitors_every_step: bool = False  # query π_high every step; switch option only on disagreement (fixes same-skill loop)
 
 
 @dataclass
@@ -56,10 +57,12 @@ class LowLevelChunkExecutor:
         config: HierarchicalPolicyConfig,
         *,
         external_beta_fn: Any | None = None,
+        bid_sampler: Any | None = None,
     ) -> None:
         self.pi_low = pi_low
         self.config = config
         self.external_beta_fn = external_beta_fn
+        self.bid_sampler = bid_sampler
         self._cached_action: torch.Tensor | None = None
         self._cached_action_pred: torch.Tensor | None = None
         self._cached_action_native: torch.Tensor | None = None
@@ -70,6 +73,7 @@ class LowLevelChunkExecutor:
         self._last_chunk_was_short: bool = False  # fallback when no duration channel
         self._continuous_horizon: float | None = None  # mean(duration) * horizon, pre-rounding
         self._fresh_option: bool = False  # True after clear_cache; skip post-replan β check once
+        self._last_replanned_chunk_len: int | None = None  # native chunk length from most recent replan
 
     @property
     def last_beta(self) -> torch.Tensor | None:
@@ -78,6 +82,11 @@ class LowLevelChunkExecutor:
     @property
     def last_replanned(self) -> bool:
         return self._last_replanned
+
+    @property
+    def last_replanned_chunk_len(self) -> int | None:
+        """Native chunk length from the most recent replan; None before first replan or after clear_cache."""
+        return self._last_replanned_chunk_len
 
     @property
     def option_done(self) -> bool:
@@ -123,6 +132,9 @@ class LowLevelChunkExecutor:
         self._last_chunk_was_short = False
         self._continuous_horizon = None
         self._fresh_option = True  # guarantee at least one action before β can fire
+        self._last_replanned_chunk_len = None
+        if self.bid_sampler is not None:
+            self.bid_sampler.reset()  # prior resets on option switch
 
     def _strip_env_actions(self, action: torch.Tensor) -> torch.Tensor:
         dim = int(self.config.env_action_dim)
@@ -175,13 +187,17 @@ class LowLevelChunkExecutor:
             return None
 
     def _run_diffusion(self, obs_dict: dict[str, Any], option_id: torch.Tensor) -> None:
-        out = self.pi_low.predict_action(obs_dict, option_id)
+        if self.bid_sampler is not None:
+            out = self.bid_sampler.sample_chunk(obs_dict, option_id)
+        else:
+            out = self.pi_low.predict_action(obs_dict, option_id)
         self._cached_action = out["action"]
         self._cached_action_pred = out["action_pred"]
         self._cached_action_native = out.get("action_unstretched")
         self._cursor = 0
         self._last_replanned = True
         chunk_len = self._chunk_length()
+        self._last_replanned_chunk_len = chunk_len
         self._last_chunk_was_short = (
             chunk_len is not None and chunk_len < self.config.n_action_steps
         )

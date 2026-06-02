@@ -1,0 +1,147 @@
+# ============================================================
+# Experiment: termination_study / stage1_bottleneck_source
+# Run: BOTTLENECK_EXPERT_POSITIVE_NEGATIVE_SEPARATE
+#   Architecture: fresh UNet (random init) + fresh ResNet (ImageNet init) — SEPARATE from DP.
+#   Gradient flows: BCE → β MLP → UNet bottleneck → ResNet + option_embed.
+#   Training signal: expert actions at t=0 → UNet bottleneck → β MLP.
+#   Labels: completion (β=1 at last frame) + escape (β=1 for wrong-option examples).
+#   Schedule: 250 epochs, 5-epoch linear warmup, cosine decay to 0.
+#
+# Key differences vs exp_term_bottleneck_expert_positive_negative:
+#   termination_stop_grad: false  — full gradient flow (UNet + ResNet adapt for β task)
+#   imagenet_init: true           — ResNet from ImageNet, UNet from random init
+#   checkpoint: null              — no DP warmstart; network learns purely from β signal
+#   lr: 1.0e-4 with cosine decay  — backbone trains (was lr=0 in frozen variants)
+#   lr_warmup_epochs: 5           — brief warmup from ImageNet init
+#
+# Research question: does a fully end-to-end β network (UNet features optimized for
+# "does this action plan match this obs/option?") beat the frozen DP bottleneck?
+#
+# pos_weight: null → auto (~0.46 for K=3, L≈17 escape distribution)
+# completion_weight: 68 → 2:1:1 ratio (natural:β-0:escape), natural gets 50% of gradient
+# ============================================================
+
+name: exp_term_bottleneck_expert_positive_negative_separate
+
+n_obs_steps: 2
+n_action_steps: 8
+horizon: null
+past_action_visible: false
+obs_as_global_cond: true
+
+task:
+  name: pusht_image
+  env_runner:
+    legacy_test: true
+    test_start_seed: 100000
+    max_steps: 300
+    fps: 10
+    crf: 22
+    render_size: 96
+    tqdm_interval_sec: 5.0
+  dataset:
+    zarr_path: data/raw/pusht/pusht.zarr
+    option_id_key: option_id_supervised
+    val_ratio: 0.1
+    seed: 42
+    min_segment_len: 3
+    num_workers: 8
+    anchor_cut_last_n: 0
+
+policy:
+  kernel_size: 9
+  crop_shape: [84, 84]
+  num_inference_steps: 100
+  diffusion_step_embed_dim: 128
+  down_dims: [512, 1024, 2048]
+  n_groups: 8
+  cond_predict_scale: true
+  eval_fixed_crop: true
+  obs_encoder_group_norm: true
+
+low_policy:
+  num_options: null
+  option_embed_dim: 32
+  bottleneck_dim: 2048
+  termination_input: bottleneck        # expert actions at t=0 → UNet bottleneck
+  termination_stop_grad: false         # GRADIENT FLOWS: BCE → β MLP → UNet → ResNet
+  termination_label_smoothing: 0.05
+  escape_relabeling: true              # completion + escape (positive_negative expand-all)
+  imagenet_init: true                  # ResNet from ImageNet; UNet from random init
+  termination_head:
+    bottleneck_dim: 2048
+    hidden_dim: 256
+    num_layers: 2
+    use_chunk_cursor: false
+    dropout_rate: 0.3
+
+noise_scheduler:
+  num_train_timesteps: 100
+  beta_start: 0.0001
+  beta_end: 0.02
+  beta_schedule: squaredcos_cap_v2
+  clip_sample: true
+  prediction_type: epsilon
+  variance_type: fixed_small
+
+train_low:
+  device: cuda:0
+  seed: 42
+  num_workers: 4
+  output_dir: null
+  wandb_enabled: true
+  wandb_project: soda-final-experiments
+  wandb_run_name: null
+  wandb_group: termination_study_stage1
+  wandb_tags: [termination_study, stage1, bottleneck_expert_positive_negative_separate, end_to_end]
+  use_ema: true
+  run_readme: null
+
+  # --- schedule: 250 epochs, 5-epoch warmup, cosine decay ---
+  num_epochs: 250
+  batch_size: 64
+  lr: 1.0e-4                   # backbone LR (UNet + ResNet train via β gradient)
+  lr_warmup_epochs: 5
+  lr_schedule_type: cosine
+  lr_plateau_patience: null
+  lr_plateau_patience_beta: null
+  lr_plateau_factor: null
+  lr_plateau_min_lr: null
+  weight_decay: 1.0e-6
+  checkpoint_every: 10
+
+  # --- termination: ACTIVE, backbone TRAINS from β gradient ---
+  termination_loss_weight: 1.0
+  termination_stop_grad: false         # must match low_policy.termination_stop_grad
+  termination_pos_weight: null         # auto (~0.46 for K=3, L≈17 escape distribution)
+  completion_weight: 68.0              # 2:1:1 ratio: natural=50%, β-0=25%, escape=25%
+  beta_lr: 1.0e-3                      # β MLP has higher LR (trains faster from scratch)
+  skip_diffusion_loss: true            # no MSE loss; UNet learns only for β task
+  beta_stratified_batches: false
+  mask_diffusion_on_positive: false
+
+  # --- data ---
+  all_anchors: true
+  option_balance: none
+  best_checkpoint_metric: loss_termination
+
+  # --- checkpoint: NO DP warmstart — fresh network ---
+  finetune_dp_checkpoint: null
+  warmstart_unet: null
+  checkpoint: null                     # normalizer is set from training data
+
+inference:
+  beta_transition: 0.92
+  beta_diffusion_t: 0
+  high_checkpoint: /experiments/final_experiments/pusht/high_study/high_starts_prev_opt/best.ckpt
+  low_checkpoint: /experiments/final_experiments/pusht/kernel_size_study/k9/epoch_0450.ckpt
+
+eval:
+  wandb_enabled: true
+  wandb_project: soda-final-experiments
+  policy: soda
+  record_video: true
+  smoke:
+    n_test: 5
+  full:
+    n_test: 50

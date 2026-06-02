@@ -88,6 +88,9 @@ def _build_invoke_command(
     output_dir: str | None,
     no_video: bool,
     video_failure_threshold: float | None,
+    noise_eta: float,
+    noise_rho: float,
+    noise_scale_by_magnitude: bool,
     local_save_path: str | None,
 ) -> str:
     parts = [
@@ -119,6 +122,12 @@ def _build_invoke_command(
         parts.append("--no-video")
     if video_failure_threshold != 20.0:
         parts.append(f"--video-failure-threshold {video_failure_threshold}")
+    if noise_eta != 0.0:
+        parts.append(f"--noise-eta {noise_eta}")
+    if noise_rho != 0.9:
+        parts.append(f"--noise-rho {noise_rho}")
+    if noise_scale_by_magnitude:
+        parts.append("--noise-scale-by-magnitude")
     if local_save_path:
         parts.append(f"--local-save-path {local_save_path}")
     return " ".join(parts)
@@ -136,10 +145,14 @@ def main(
     beta_transition: float | None = None,
     open_loop: bool = False,
     duration_termination: bool = False,
+    high_monitors_every_step: bool = False,
     max_steps: int = 300,
     output_dir: str | None = None,
     no_video: bool = False,
     video_failure_threshold: float | None = 20.0,
+    noise_eta: float = 0.0,
+    noise_rho: float = 0.9,
+    noise_scale_by_magnitude: bool = False,
     local_save_path: str | None = None,
 ):
     """
@@ -186,6 +199,9 @@ def main(
         output_dir=output_dir,
         no_video=no_video,
         video_failure_threshold=video_failure_threshold,
+        noise_eta=noise_eta,
+        noise_rho=noise_rho,
+        noise_scale_by_magnitude=noise_scale_by_magnitude,
         local_save_path=local_save_path,
     )
 
@@ -201,10 +217,14 @@ def main(
         beta_transition=beta_transition,
         open_loop=open_loop,
         duration_termination=duration_termination,
+        high_monitors_every_step=high_monitors_every_step,
         max_steps=max_steps,
         output_dir=output_dir,
         no_video=no_video,
         video_failure_threshold=video_failure_threshold,
+        noise_eta=noise_eta,
+        noise_rho=noise_rho,
+        noise_scale_by_magnitude=noise_scale_by_magnitude,
         invoke_command=invoke_command,
     )
 

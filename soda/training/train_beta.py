@@ -51,6 +51,7 @@ class TrainBetaConfig:
     # --- Beta loss ---
     beta_pos_weight: float | None       # null → auto from dataset class frequencies
     label_smoothing: float              # 0.05 — matches other term experiments
+    completion_weight: float | None     # null → disabled; ~2*(K-1)*avg_len to equalize natural β=1 vs escape
     # --- Data ---
     all_anchors: bool                   # True — required for escape_relabeling
     # --- W&B ---
@@ -91,6 +92,7 @@ class TrainBetaConfig:
             best_checkpoint_metric=str(_req("best_checkpoint_metric")),
             beta_pos_weight=_opt_float("beta_pos_weight"),
             label_smoothing=float(_cfg_get(block, "label_smoothing", 0.05)),
+            completion_weight=_opt_float("completion_weight"),
             all_anchors=bool(_cfg_get(block, "all_anchors", True)),
             wandb_enabled=bool(_req("wandb_enabled")),
             wandb_project=str(_req("wandb_project")),
@@ -153,7 +155,7 @@ def build_beta_datasets(cfg: Any, *, all_anchors: bool = True):
         )
     })
     train_ds = build_option_dataset_from_config(ds_cfg)
-    val_ds = train_ds.get_validation_dataset(all_anchors=all_anchors)
+    val_ds = train_ds.get_validation_dataset(all_anchors=all_anchors, escape_relabeling=True)
     return train_ds, val_ds
 
 
@@ -256,6 +258,7 @@ def train_one_epoch(
     *,
     pos_weight: float | None,
     label_smoothing: float,
+    completion_weight: float | None = None,
     ema: Any | None = None,
 ) -> dict[str, float]:
     from soda.training.losses_low import termination_bce_loss
@@ -270,7 +273,13 @@ def train_one_epoch(
     for batch in tqdm(loader, desc="train", leave=False):
         batch = _move_batch(batch, device)
         logit = model.forward_logit(batch["obs"], batch["option_id"])
-        loss = termination_bce_loss(logit, batch["beta_label"], pos_weight=pw, label_smoothing=label_smoothing)
+        loss = termination_bce_loss(
+            logit, batch["beta_label"],
+            pos_weight=pw,
+            label_smoothing=label_smoothing,
+            is_escape=batch.get("is_escape"),
+            completion_weight=completion_weight,
+        )
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
         # Capture per-group grad norms on the first batch — confirms gradients reach the
@@ -298,6 +307,7 @@ def validate(
     *,
     pos_weight: float | None,
     label_smoothing: float,
+    completion_weight: float | None = None,
 ) -> dict[str, float]:
     from soda.training.losses_low import (
         BetaConfusionCounts,
@@ -311,6 +321,8 @@ def validate(
     total_loss = 0.0
     n_batches = 0
     beta_counts = BetaConfusionCounts()
+    escape_counts = BetaConfusionCounts()
+    natural_counts = BetaConfusionCounts()
     mae_sum = 0.0
     mae_n = 0
 
@@ -319,17 +331,40 @@ def validate(
     for batch in tqdm(loader, desc="val", leave=False):
         batch = _move_batch(batch, device)
         logit = model.forward_logit(batch["obs"], batch["option_id"])
-        loss = termination_bce_loss(logit, batch["beta_label"], pos_weight=pw, label_smoothing=label_smoothing)
+        loss = termination_bce_loss(
+            logit, batch["beta_label"],
+            pos_weight=pw,
+            label_smoothing=label_smoothing,
+            is_escape=batch.get("is_escape"),
+            completion_weight=completion_weight,
+        )
         total_loss += float(loss.detach().item())
         n_batches += 1
+
         beta_counts += beta_confusion_counts_from_logits(logit, batch["beta_label"])
         s, n = beta_mae_from_logits(logit, batch["beta_label"])
         mae_sum += s
         mae_n += n
 
+        is_escape = batch.get("is_escape")
+        if is_escape is not None:
+            esc_mask = is_escape.bool()
+            nat_mask = ~esc_mask
+            if esc_mask.any():
+                escape_counts += beta_confusion_counts_from_logits(
+                    logit[esc_mask], batch["beta_label"][esc_mask]
+                )
+            if nat_mask.any():
+                natural_counts += beta_confusion_counts_from_logits(
+                    logit[nat_mask], batch["beta_label"][nat_mask]
+                )
+
     metrics = {"loss_termination": total_loss / max(n_batches, 1)}
     metrics.update(beta_metrics_from_counts(beta_counts))
     metrics["beta_mae"] = mae_sum / mae_n if mae_n > 0 else float("nan")
+    for prefix, counts in (("escape", escape_counts), ("natural", natural_counts)):
+        for k, v in beta_metrics_from_counts(counts).items():
+            metrics[f"{prefix}_{k}"] = v
     return metrics
 
 
@@ -431,16 +466,18 @@ def run_training(cfg: Any) -> None:
     model = _build_standalone_beta_from_cfg(cfg, train_ds, normalizer=normalizer)
     model.to(device)
 
-    # pos_weight
+    # pos_weight / completion_weight
+    completion_weight = train_cfg.completion_weight
     pos_weight = train_cfg.beta_pos_weight
+    num_options = int(train_ds.num_options)
+    avg_len = sum(s.length for s in train_ds.segments) / len(train_ds.segments)
+
+    if completion_weight is not None:
+        print(f"[train_beta] completion_weight={completion_weight:.1f}  (natural β=1 upweight)  "
+              f"K={num_options}, avg_len={avg_len:.1f}")
+
     if pos_weight is None:
-        # Auto-calculate: for K=3 options with escape_relabeling, formula from termination_utils
-        # but escape_relabeling changes the distribution; use avg_len / ((avg_len-1)*(K-1) + K)
-        num_options = int(train_ds.num_options)
-        avg_len = sum(s.length for s in train_ds.segments) / len(train_ds.segments)
-        # With escape_relabeling, each anchor generates K samples: 1 with real label + K-1 escape(β=1)
-        # Fraction of positives ≈ (1/(L) + (K-1)) / K = ((K-1)*L + 1) / (K*L)
-        # pos_weight to balance ≈ neg_fraction / pos_fraction
+        # Auto-calculate for escape_relabeling distribution.
         K = num_options
         L = avg_len
         pos_frac = (1 + (K - 1) * L) / (K * L)
@@ -494,6 +531,7 @@ def run_training(cfg: Any) -> None:
             model, train_loader, optimizer, device,
             pos_weight=pos_weight,
             label_smoothing=train_cfg.label_smoothing,
+            completion_weight=completion_weight,
             ema=ema,
         )
         # ema.step(model) (called per batch in train_one_epoch) already updated ema_model
@@ -503,9 +541,12 @@ def run_training(cfg: Any) -> None:
             val_loader, device,
             pos_weight=pos_weight,
             label_smoothing=train_cfg.label_smoothing,
+            completion_weight=completion_weight,
         )
 
-        combined = {"epoch": epoch, **{f"train/{k}": v for k, v in train_metrics.items()},
+        current_lr = optimizer.param_groups[0]["lr"]
+        combined = {"epoch": epoch, "train/lr": current_lr,
+                    **{f"train/{k}": v for k, v in train_metrics.items()},
                     **{f"val/{k}": v for k, v in val_metrics.items()}}
         metrics_log.append(combined)
 

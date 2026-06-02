@@ -147,6 +147,9 @@ def run_low_only_pusht_eval(
     train_start_seed: int = 0,
     record_video: bool = True,
     overlap_checkpoints: tuple[int, ...] = DEFAULT_OVERLAP_CHECKPOINTS,
+    noise_eta: float = 0.0,
+    noise_rho: float = 0.9,
+    noise_scale_by_magnitude: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """
     Load π_low, hold ``fixed_option_id`` constant for the episode, run sim eval.
@@ -186,6 +189,9 @@ def run_low_only_pusht_eval(
         test_start_seed=seed,
         train_start_seed=train_start_seed,
         overlap_checkpoints=overlap_checkpoints,
+        noise_eta=noise_eta,
+        noise_rho=noise_rho,
+        noise_scale_by_magnitude=noise_scale_by_magnitude,
     )
 
     runner_log = runner.run(wrapped)

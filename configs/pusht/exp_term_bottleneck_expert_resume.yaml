@@ -1,0 +1,135 @@
+# ============================================================
+# Resume: exp_term_bottleneck_expert — epochs 101-250.
+#
+# Inherits all settings from exp_term_bottleneck_expert. Only differences:
+#   - num_epochs: 150  (runs 150 MORE epochs; epoch_offset=100 → saves as 101-250)
+#   - resume_from_checkpoint: path to epoch_0100.ckpt on Modal volume
+#   - wandb_resume_id: the W&B run ID from the original run (find in W&B UI URL)
+#
+# Find your W&B run ID: open the run in W&B → the URL is
+#   https://wandb.ai/<entity>/<project>/runs/<RUN_ID>
+# Copy <RUN_ID> and set it below (or override via hydra: train_low.wandb_resume_id=<id>)
+# ============================================================
+
+name: exp_term_bottleneck_expert_resume
+
+n_obs_steps: 2
+n_action_steps: 8
+horizon: null
+past_action_visible: false
+obs_as_global_cond: true
+
+task:
+  name: pusht_image
+  env_runner:
+    legacy_test: true
+    test_start_seed: 100000
+    max_steps: 300
+    fps: 10
+    crf: 22
+    render_size: 96
+    tqdm_interval_sec: 5.0
+  dataset:
+    zarr_path: data/raw/pusht/pusht.zarr
+    option_id_key: option_id_supervised
+    val_ratio: 0.1
+    seed: 42
+    min_segment_len: 3
+    num_workers: 8
+    anchor_cut_last_n: 0
+
+policy:
+  kernel_size: 9
+  crop_shape: [84, 84]
+  num_inference_steps: 100
+  diffusion_step_embed_dim: 128
+  down_dims: [512, 1024, 2048]
+  n_groups: 8
+  cond_predict_scale: true
+  eval_fixed_crop: true
+  obs_encoder_group_norm: true
+
+low_policy:
+  num_options: null
+  option_embed_dim: 32
+  bottleneck_dim: 2048
+  termination_input: bottleneck
+  termination_stop_grad: true
+  termination_label_smoothing: 0.05
+  escape_relabeling: false
+  termination_head:
+    bottleneck_dim: 2048
+    hidden_dim: 256
+    num_layers: 2
+    use_chunk_cursor: false
+    dropout_rate: 0.3
+
+noise_scheduler:
+  num_train_timesteps: 100
+  beta_start: 0.0001
+  beta_end: 0.02
+  beta_schedule: squaredcos_cap_v2
+  clip_sample: true
+  prediction_type: epsilon
+  variance_type: fixed_small
+
+train_low:
+  device: cuda:0
+  seed: 42
+  num_workers: 4
+  output_dir: null
+  wandb_enabled: true
+  wandb_project: soda-final-experiments
+  wandb_run_name: null         # ignored when wandb_resume_id is set
+  wandb_group: termination_study_stage1
+  wandb_tags: [termination_study, stage1, bottleneck_expert, frozen, resumed]
+  use_ema: true
+  run_readme: null
+
+  # --- schedule: 150 MORE epochs (offset=100 → saves as epoch_0101 … epoch_0250) ---
+  num_epochs: 150
+  batch_size: 64
+  lr: 1.0e-4
+  lr_warmup_epochs: 0
+  lr_schedule_type: constant
+  lr_plateau_patience: null
+  lr_plateau_patience_beta: null
+  lr_plateau_factor: null
+  lr_plateau_min_lr: null
+  weight_decay: 1.0e-6
+  checkpoint_every: 10
+
+  # --- termination ---
+  termination_loss_weight: 1.0
+  termination_stop_grad: true
+  termination_pos_weight: null
+  beta_lr: 1.0e-3
+  skip_diffusion_loss: true
+  beta_stratified_batches: false
+  mask_diffusion_on_positive: false
+
+  # --- data ---
+  all_anchors: true
+  option_balance: none
+  best_checkpoint_metric: loss_termination
+
+  # --- resume (overridden by modal_train_stage1_resume.py) ---
+  checkpoint: null
+  resume_from_checkpoint: /experiments/final_experiments/pusht/termination_study/stage1/bottleneck_expert/epoch_0100.ckpt
+  wandb_resume_id: null        # REQUIRED: override with your W&B run ID
+
+inference:
+  beta_transition: 0.92
+  beta_diffusion_t: 0
+  high_checkpoint: /experiments/final_experiments/pusht/high_study/high_starts_prev_opt/best.ckpt
+  low_checkpoint: null
+
+eval:
+  wandb_enabled: true
+  wandb_project: soda-final-experiments
+  policy: soda
+  record_video: true
+  smoke:
+    n_test: 5
+  full:
+    n_test: 50

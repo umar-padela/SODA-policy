@@ -66,6 +66,9 @@ def _build_invoke_command(
     no_video: bool,
     local_save_path: str | None,
     output_dir: str | None,
+    noise_eta: float,
+    noise_rho: float,
+    noise_scale_by_magnitude: bool,
 ) -> str:
     parts = ["modal run modal/modal_eval.py", f'--run-readme "{run_readme}"', f"--config {config}"]
     if full:
@@ -92,6 +95,12 @@ def _build_invoke_command(
         parts.append(f"--local-save-path {local_save_path}")
     if output_dir:
         parts.append(f"--output-dir {output_dir}")
+    if noise_eta != 0.0:
+        parts.append(f"--noise-eta {noise_eta}")
+    if noise_rho != 0.9:
+        parts.append(f"--noise-rho {noise_rho}")
+    if noise_scale_by_magnitude:
+        parts.append("--noise-scale-by-magnitude")
     return " ".join(parts)
 
 
@@ -111,6 +120,9 @@ def main(
     no_video: bool = False,
     local_save_path: str | None = None,
     output_dir: str | None = None,
+    noise_eta: float = 0.0,
+    noise_rho: float = 0.9,
+    noise_scale_by_magnitude: bool = False,
 ):
     """
     Run Push-T eval on Modal.
@@ -146,6 +158,9 @@ def main(
         no_video=no_video,
         local_save_path=local_save_path,
         output_dir=output_dir,
+        noise_eta=noise_eta,
+        noise_rho=noise_rho,
+        noise_scale_by_magnitude=noise_scale_by_magnitude,
     )
     result = spawn_modal_function(
         eval_run,
@@ -164,6 +179,9 @@ def main(
         record_video=not no_video,
         invoke_command=invoke_command,
         output_dir=output_dir,
+        noise_eta=noise_eta,
+        noise_rho=noise_rho,
+        noise_scale_by_magnitude=noise_scale_by_magnitude,
     )
 
     print("\n--- eval_run result ---")

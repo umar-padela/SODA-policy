@@ -34,6 +34,10 @@ from soda.option_discovery.supervised.pusht.frame_overlays import (
 
 __all__ = ["HierarchicalPolicy", "HierarchicalPolicyConfig"]
 
+# Chunks this short (in native decoded steps) are treated as pathological —
+# the same option is excluded from π_high's next prediction to break the loop.
+_SHORT_CHUNK_STEPS = 2
+
 
 class HierarchicalPolicy:
     """π_high selects ω; π_low diffuses chunks; β ends a segment."""
@@ -46,6 +50,7 @@ class HierarchicalPolicy:
         checkpoint: Path | None = None,
         pi_high: Any | None = None,
         pi_low: Any | None = None,
+        pi_low_weak: Any | None = None,
         external_beta: Any | None = None,
     ) -> None:
         self.device = device
@@ -54,6 +59,7 @@ class HierarchicalPolicy:
         self.checkpoint = checkpoint
         self._pi_high = pi_high
         self._pi_low = pi_low
+        self._pi_low_weak = pi_low_weak
         self._external_beta = external_beta
         self._executor: LowLevelChunkExecutor | None = None
         self._current_option_id: torch.Tensor | None = None
@@ -61,6 +67,7 @@ class HierarchicalPolicy:
         self._last_overlay: LowPolicyOverlayInfo = LowPolicyOverlayInfo()
         self._last_option_id: int | None = None
         self._last_fired_beta: torch.Tensor | None = None  # beta that triggered most recent option switch
+        self._short_chunk_flag: bool = False  # set when last replan produced ≤ _SHORT_CHUNK_STEPS; forces option switch
 
     @property
     def last_overlay(self) -> LowPolicyOverlayInfo:
@@ -94,8 +101,14 @@ class HierarchicalPolicy:
 
     def _executor_for(self, pi_low: Any) -> LowLevelChunkExecutor:
         if self._executor is None or self._executor.pi_low is not pi_low:
+            bid_sampler = None
+            if self._pi_low_weak is not None:
+                from soda.eval.bid_sampler import BIDSampler
+                bid_sampler = BIDSampler(pi_low, self._pi_low_weak)
             self._executor = LowLevelChunkExecutor(
-                pi_low, self.config, external_beta_fn=self._external_beta
+                pi_low, self.config,
+                external_beta_fn=self._external_beta,
+                bid_sampler=bid_sampler,
             )
         else:
             self._executor.config = self.config
@@ -107,6 +120,7 @@ class HierarchicalPolicy:
         self._last_overlay = LowPolicyOverlayInfo()
         self._last_option_id = None
         self._last_fired_beta = None
+        self._short_chunk_flag = False
         if self._executor is not None:
             self._executor.reset()
         elif self._pi_low is not None and hasattr(self._pi_low, "reset"):
@@ -148,10 +162,17 @@ class HierarchicalPolicy:
             beta_threshold=float(self.config.beta_transition),
         )
 
-    def _sample_option(self, pi_high: Any, obs_dict: dict[str, Any]) -> torch.Tensor:
+    def _sample_option(
+        self,
+        pi_high: Any,
+        obs_dict: dict[str, Any],
+        *,
+        exclude_option_id: int | None = None,
+    ) -> torch.Tensor:
         return pi_high.sample_option(
             pi_high.encode_obs(obs_dict),
             prev_option_id=self._prev_option_id,
+            exclude_option_id=exclude_option_id,
         )
 
     @torch.no_grad()
@@ -175,15 +196,50 @@ class HierarchicalPolicy:
                     self._prev_option_id = int(self._current_option_id.reshape(-1)[0].item())
                 self._current_option_id = self._sample_option(pi_high, obs_dict)
             result = executor.step(obs_dict, self._current_option_id)
+        elif self.config.duration_termination and self.config.high_monitors_every_step:
+            # π_high monitors every step. Only clear cache and switch on option change.
+            # Same-option prediction → keep executing; executor handles duration replan
+            # internally.
+            # If the last replan produced a very short chunk (≤ _SHORT_CHUNK_STEPS), force
+            # π_high to pick a different option — same-option re-selection would immediately
+            # produce another short chunk and loop forever.
+            curr_id = (
+                int(self._current_option_id.reshape(-1)[0].item())
+                if self._current_option_id is not None
+                else -1
+            )
+            exclude_id = (
+                curr_id
+                if self._short_chunk_flag and self._current_option_id is not None
+                else None
+            )
+            candidate = self._sample_option(pi_high, obs_dict, exclude_option_id=exclude_id)
+            cand_id = int(candidate.reshape(-1)[0].item())
+            if self._current_option_id is None or cand_id != curr_id:
+                if self._current_option_id is not None:
+                    self._prev_option_id = curr_id
+                self._current_option_id = candidate
+                executor.clear_cache()
+                self._short_chunk_flag = False
+            result = executor.step(obs_dict, self._current_option_id)
+            if result.replanned:
+                chunk_len = executor.last_replanned_chunk_len
+                self._short_chunk_flag = (
+                    chunk_len is not None and chunk_len <= _SHORT_CHUNK_STEPS
+                )
         elif self.config.duration_termination:
             need_new_option = (
                 self._current_option_id is None
                 or (executor.needs_replan and executor.option_done)
             )
             if need_new_option:
+                exclude_id: int | None = None
                 if self._current_option_id is not None:
-                    self._prev_option_id = int(self._current_option_id.reshape(-1)[0].item())
-                self._current_option_id = self._sample_option(pi_high, obs_dict)
+                    exclude_id = int(self._current_option_id.reshape(-1)[0].item())
+                    self._prev_option_id = exclude_id
+                self._current_option_id = self._sample_option(
+                    pi_high, obs_dict, exclude_option_id=exclude_id
+                )
             result = executor.step(obs_dict, self._current_option_id)
         else:
             if self._current_option_id is None:

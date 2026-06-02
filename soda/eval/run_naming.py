@@ -101,6 +101,7 @@ def build_eval_run_dir_name(
     ckpt_slug: str | None = None,
     test_start_seed: int = DEFAULT_TEST_START_SEED,
     timestamp: datetime | None = None,
+    noise_eta: float = 0.0,
 ) -> str:
     """Return a single directory name (no slashes) for one eval run."""
     ts = timestamp or datetime.now(timezone.utc)
@@ -114,6 +115,8 @@ def build_eval_run_dir_name(
         f"ckpt-{checkpoint_slug(checkpoint, ckpt_slug)}",
         f"t{int(max_steps)}",
     ]
+    if float(noise_eta) != 0.0:
+        parts.append(f"eta{_sanitize_token(str(noise_eta))}")
     if int(test_start_seed) != DEFAULT_TEST_START_SEED:
         parts.append(f"seed{int(test_start_seed)}")
     parts.append(f"utc{utc}")

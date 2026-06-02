@@ -42,6 +42,9 @@ class EvalCliOverrides:
     policy: PolicySource | None = None
     fixed_option_id: int | None = None
     run_readme: str | None = None
+    noise_eta: float = 0.0
+    noise_rho: float = 0.9
+    noise_scale_by_magnitude: bool = False
 
 
 @dataclass
@@ -71,6 +74,9 @@ class EvalConfig:
     wandb_enabled: bool = True
     wandb_project: str = "soda-eval"
     run_readme: str | None = None
+    noise_eta: float = 0.0
+    noise_rho: float = 0.9
+    noise_scale_by_magnitude: bool = False
 
     @property
     def soda_config_name(self) -> str:
@@ -220,6 +226,8 @@ def build_eval_config_from_yaml(
         wandb_enabled=bool(_cfg_get(eval_block, "wandb_enabled", True)),
         wandb_project=str(_cfg_get(eval_block, "wandb_project", "soda-eval")),
         run_readme=cli.run_readme or _cfg_get(eval_block, "run_readme", None),
+        noise_eta=float(cli.noise_eta),
+        noise_rho=float(cli.noise_rho),
     )
     if finalize_checkpoints:
         return finalize_eval_config(cfg, yaml_cfg=yaml_cfg)

@@ -107,6 +107,9 @@ def run_pusht_eval(
             train_start_seed=config.train_start_seed,
             record_video=config.record_video,
             overlap_checkpoints=config.overlap_checkpoints,
+            noise_eta=config.noise_eta,
+            noise_rho=config.noise_rho,
+            noise_scale_by_magnitude=config.noise_scale_by_magnitude,
         )
     elif config.policy_source == "soda":
         summary, runner_log = run_soda_pusht_eval(
@@ -125,6 +128,9 @@ def run_pusht_eval(
             overlap_checkpoints=config.overlap_checkpoints,
             high_checkpoint=config.high_checkpoint,
             low_checkpoint=config.low_checkpoint,
+            noise_eta=config.noise_eta,
+            noise_rho=config.noise_rho,
+            noise_scale_by_magnitude=config.noise_scale_by_magnitude,
         )
     elif config.policy_source == "soda_low":
         assert config.fixed_option_id is not None
@@ -144,6 +150,9 @@ def run_pusht_eval(
             train_start_seed=config.train_start_seed,
             record_video=config.record_video,
             overlap_checkpoints=config.overlap_checkpoints,
+            noise_eta=config.noise_eta,
+            noise_rho=config.noise_rho,
+            noise_scale_by_magnitude=config.noise_scale_by_magnitude,
         )
     else:
         raise ValueError(f"Unknown policy_source: {config.policy_source}")
@@ -177,6 +186,7 @@ def run_pusht_eval(
         ckpt_slug=config.ckpt_slug,
         test_start_seed=config.test_start_seed,
         timestamp=run_timestamp,
+        noise_eta=config.noise_eta,
     )
 
     result = {
@@ -309,6 +319,19 @@ def main() -> int:
         default=None,
         help="Required description of this eval run (also via SODA_RUN_README env)",
     )
+    parser.add_argument(
+        "--noise-eta",
+        type=float,
+        default=0.0,
+        help="Action noise magnitude η (0.0 = no noise). Temporally correlated Gaussian noise "
+             "added to executed actions before env.step(). Try η=1.0 (moderate), η=1.5 (severe).",
+    )
+    parser.add_argument(
+        "--noise-rho",
+        type=float,
+        default=0.9,
+        help="AR(1) temporal correlation ρ for action noise (default 0.9).",
+    )
     args = parser.parse_args()
 
     cli = EvalCliOverrides(
@@ -324,6 +347,8 @@ def main() -> int:
         policy=args.policy,
         fixed_option_id=args.fixed_option_id,
         run_readme=args.run_readme,
+        noise_eta=args.noise_eta,
+        noise_rho=args.noise_rho,
     )
     cfg = build_eval_config_from_yaml(args.config, cli=cli)
 

@@ -266,8 +266,7 @@ class OptionAwareDataset:
         self._seed = int(seed)
         self._max_train_episodes = max_train_episodes
         self._rng = np.random.default_rng(seed)
-        # escape_relabeling only applies to train split — silently disabled for val.
-        self.escape_relabeling = bool(escape_relabeling) and bool(train)
+        self.escape_relabeling = bool(escape_relabeling)
 
         root = zarr.open(str(self.zarr_path), mode="r")
         data = root["data"]
@@ -359,7 +358,12 @@ class OptionAwareDataset:
         """
         self._stratified_encoded_indices = bool(enabled)
 
-    def get_validation_dataset(self, *, all_anchors: bool = False) -> OptionAwareDataset:
+    def get_validation_dataset(
+        self,
+        *,
+        all_anchors: bool = False,
+        escape_relabeling: bool = False,
+    ) -> OptionAwareDataset:
         """Validation split (complement of train episode mask).
 
         Uses the same ``seed`` as train so ``episode_train_mask`` picks one val
@@ -370,6 +374,10 @@ class OptionAwareDataset:
         Pass ``all_anchors=True`` when train also uses all_anchors so val sees
         every (segment, anchor) pair each epoch — deterministic and consistent
         with the training distribution.
+
+        Pass ``escape_relabeling=True`` to match the train distribution (each anchor
+        expanded to K samples including K-1 escape β=1 examples), making val loss
+        comparable to train loss.
         """
         return OptionAwareDataset(
             zarr_path=self.zarr_path,
@@ -383,7 +391,7 @@ class OptionAwareDataset:
             train=False,
             random_anchor=self.random_anchor,
             all_anchors=all_anchors,
-            escape_relabeling=False,  # val always uses real labels
+            escape_relabeling=escape_relabeling,
         )
 
     def __len__(self) -> int:

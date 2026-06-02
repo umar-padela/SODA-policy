@@ -81,14 +81,16 @@ train_beta:
   # Training
   num_epochs: 100
   batch_size: 64
-  lr: 1.0e-4                     # same as other termination experiments
+  lr: 1.0e-3                     # matches other termination experiments
   weight_decay: 1.0e-6           # matches Columbia DP
   checkpoint_every: 10
   use_ema: true
   best_checkpoint_metric: loss_termination   # provisional; rollout eval is authoritative
   # Beta loss
-  beta_pos_weight: null          # auto-calculated from dataset class frequencies (~0.46)
+  beta_pos_weight: null          # auto-calculated from escape distribution (~0.46); applies to ALL positives
   label_smoothing: 0.05          # matches all other termination experiments
+  completion_weight: 34.0        # additionally upweights natural β=1 by this factor on top of pos_weight
+                                 # net: β=0→1.0, escape β=1→0.46, natural β=1→15.6 (≈equal thirds)
   all_anchors: true              # required for escape_relabeling expand-all
   # Source checkpoint — normalizer only, NOT model weights
   checkpoint: /experiments/final_experiments/pusht/kernel_size_study/k9/epoch_0450.ckpt

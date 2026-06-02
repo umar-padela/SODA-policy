@@ -45,6 +45,9 @@ def build_soda_pusht_runner(
     test_start_seed: int,
     train_start_seed: int = 0,
     overlap_checkpoints: tuple[int, ...] = DEFAULT_OVERLAP_CHECKPOINTS,
+    noise_eta: float = 0.0,
+    noise_rho: float = 0.9,
+    noise_scale_by_magnitude: bool = False,
 ) -> SodaHierarchicalRunner:
     """Construct ``SodaHierarchicalRunner`` (parallel to ``build_pusht_image_runner``)."""
     er = cfg.task.env_runner
@@ -68,6 +71,9 @@ def build_soda_pusht_runner(
         past_action=bool(getattr(cfg, "past_action_visible", False)),
         tqdm_interval_sec=float(getattr(er, "tqdm_interval_sec", 5.0)),
         n_envs=n_envs,
+        noise_eta=noise_eta,
+        noise_rho=noise_rho,
+        noise_scale_by_magnitude=noise_scale_by_magnitude,
     )
 
 
@@ -82,12 +88,18 @@ class SodaHierarchicalRunner:
     def __init__(
         self,
         overlap_checkpoints: tuple[int, ...] = DEFAULT_OVERLAP_CHECKPOINTS,
+        noise_eta: float = 0.0,
+        noise_rho: float = 0.9,
+        noise_scale_by_magnitude: bool = False,
         **kwargs: Any,
     ):
         _require_diffusion_policy()
         from soda.eval.pusht_image_runner import PushTImageRunner
 
         self._overlap_checkpoints = overlap_checkpoints
+        self._noise_eta = float(noise_eta)
+        self._noise_rho = float(noise_rho)
+        self._noise_scale = bool(noise_scale_by_magnitude)
         self._inner = PushTImageRunner(**kwargs)
 
     def __getattr__(self, name: str) -> Any:
@@ -98,6 +110,7 @@ class SodaHierarchicalRunner:
         import torch
 
         from diffusion_policy.common.pytorch_util import dict_apply
+        from soda.eval.action_noise import TemporallyCorrelatedNoise
 
         device = policy.device
         env = self._inner.env
@@ -108,6 +121,10 @@ class SodaHierarchicalRunner:
 
         all_video_paths: list[Any] = [None] * n_inits
         all_rewards: list[list[float]] = [None] * n_inits  # type: ignore[list-item]
+
+        noise = TemporallyCorrelatedNoise(
+            eta=self._noise_eta, rho=self._noise_rho, n_envs=n_envs, action_dim=2
+        )
 
         for chunk_idx in range(n_chunks):
             start = chunk_idx * n_envs
@@ -127,6 +144,7 @@ class SodaHierarchicalRunner:
 
             obs = vector_env_reset(env)
             policy.reset()
+            noise.reset()
 
             pbar = tqdm.tqdm(
                 total=self._inner.max_steps,
@@ -153,6 +171,7 @@ class SodaHierarchicalRunner:
                     lambda x: x.detach().to("cpu").numpy(),
                 )
                 action = slice_action_chunk(np_action_dict["action"], 1)
+                action = noise.apply_to_chunk(action, scale_by_magnitude=self._noise_scale)
 
                 obs, _reward, done, _info = env.step(action)
                 done = bool(np.all(done))
@@ -215,6 +234,9 @@ def run_soda_pusht_eval(
     overlap_checkpoints: tuple[int, ...] = DEFAULT_OVERLAP_CHECKPOINTS,
     high_checkpoint: Path | None = None,
     low_checkpoint: Path | None = None,
+    noise_eta: float = 0.0,
+    noise_rho: float = 0.9,
+    noise_scale_by_magnitude: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """
     Load SODA checkpoint + yaml, run hierarchical policy in DP env runner.
@@ -254,6 +276,9 @@ def run_soda_pusht_eval(
         test_start_seed=seed,
         train_start_seed=train_start_seed,
         overlap_checkpoints=overlap_checkpoints,
+        noise_eta=noise_eta,
+        noise_rho=noise_rho,
+        noise_scale_by_magnitude=noise_scale_by_magnitude,
     )
 
     runner_log = runner.run(policy)

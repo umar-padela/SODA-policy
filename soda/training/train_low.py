@@ -175,6 +175,8 @@ class TrainLowConfig:
     skip_diffusion_loss: bool        # skip noisy U-Net forward; backbone lr is set to 0 when true
     termination_stop_grad: bool      # detach β features from backbone
     checkpoint: str | None           # SODA warmstart checkpoint (null = start fresh)
+    resume_from_checkpoint: str | None = None  # full resume: loads optimizer/scheduler/EMA + epoch offset
+    wandb_resume_id: str | None = None         # W&B run ID to continue (find in W&B UI URL); null = new run
 
     @classmethod
     def from_hydra(cls, cfg: Any) -> TrainLowConfig:
@@ -225,6 +227,8 @@ class TrainLowConfig:
             skip_diffusion_loss=bool(_cfg_require(block, "skip_diffusion_loss", "train_low")),
             termination_stop_grad=bool(_cfg_require(block, "termination_stop_grad", "train_low")),
             checkpoint=(lambda v: str(v) if v is not None else None)(_cfg_get(block, "checkpoint", None)),
+            resume_from_checkpoint=(lambda v: str(v) if v is not None else None)(_cfg_get(block, "resume_from_checkpoint", None)),
+            wandb_resume_id=(lambda v: str(v) if v is not None else None)(_cfg_get(block, "wandb_resume_id", None)),
         )
 
 
@@ -286,8 +290,13 @@ def _init_wandb_run(train_cfg: TrainLowConfig, cfg: Any, out_dir: Path) -> Any:
         "config": OmegaConf.to_container(cfg, resolve=True),
         "dir": str(out_dir),
     }
-    if train_cfg.wandb_run_name:
-        init_kwargs["name"] = str(train_cfg.wandb_run_name)
+    if train_cfg.wandb_resume_id:
+        # Resume existing run — curves continue on the same W&B page.
+        init_kwargs["id"] = str(train_cfg.wandb_resume_id)
+        init_kwargs["resume"] = "must"
+    else:
+        if train_cfg.wandb_run_name:
+            init_kwargs["name"] = str(train_cfg.wandb_run_name)
     if train_cfg.wandb_group:
         init_kwargs["group"] = str(train_cfg.wandb_group)
     if train_cfg.wandb_tags:
@@ -391,6 +400,9 @@ def _low_policy_config(
         termination_input=str(_cfg_get(block, "termination_input", "bottleneck")),
         termination_stop_grad=bool(_cfg_get(block, "termination_stop_grad", True)),
         termination_label_smoothing=float(_cfg_get(block, "termination_label_smoothing", 0.0)),
+        termination_completion_weight=(lambda v: float(v) if v is not None else None)(
+            _cfg_get(_get_block(cfg, "train_low"), "completion_weight", None)
+        ),
         imagenet_init=bool(_cfg_get(block, "imagenet_init", False)),
         escape_relabeling=bool(_cfg_get(block, "escape_relabeling", False)),
     )
@@ -421,7 +433,7 @@ def build_datasets(cfg: Any, *, all_anchors: bool = False) -> tuple[OptionAwareD
     from omegaconf import OmegaConf
     ds_cfg = OmegaConf.merge(ds_cfg, OmegaConf.create({"dataset": {"escape_relabeling": escape_relabeling}}))
     train_ds = build_option_dataset_from_config(ds_cfg)
-    val_ds = train_ds.get_validation_dataset(all_anchors=all_anchors)
+    val_ds = train_ds.get_validation_dataset(all_anchors=all_anchors, escape_relabeling=escape_relabeling)
     return train_ds, val_ds
 
 
@@ -672,9 +684,9 @@ def build_policy_and_optimizer(
     backbone_params = [p for n, p in policy.named_parameters() if "termination_head" not in n]
     beta_params = [p for n, p in policy.named_parameters() if "termination_head" in n]
     beta_lr = train_cfg.beta_lr if train_cfg.beta_lr is not None else train_cfg.lr
-    # When skip_diffusion_loss=True the backbone receives no gradients; set lr=0 so
-    # AdamW weight decay also does not nudge frozen weights.
-    backbone_lr = 0.0 if train_cfg.skip_diffusion_loss else train_cfg.lr
+    # Backbone is truly frozen only when skip_diffusion_loss=True AND stop_grad=True.
+    # With stop_grad=False the backbone receives β gradients even when diffusion is skipped.
+    backbone_lr = 0.0 if (train_cfg.skip_diffusion_loss and train_cfg.termination_stop_grad) else train_cfg.lr
 
     _adamw_kwargs: dict = {"betas": (0.95, 0.999), "eps": 1e-8, "weight_decay": train_cfg.weight_decay}
     optimizer_backbone = torch.optim.AdamW(backbone_params, lr=backbone_lr, **_adamw_kwargs)
@@ -730,6 +742,46 @@ def _reload_phase_checkpoint(policy: Any, ema_model: Any | None, checkpoint_path
     if ema_model is not None and ckpt.get("ema_policy") is not None:
         _filtered_load(ema_model, ckpt["ema_policy"])
     print(f"Reloaded checkpoint for phase 2: {checkpoint_path}")
+
+
+def _resume_training_checkpoint(
+    checkpoint_path: str,
+    device: str,
+    policy: Any,
+    ema_model: Any | None,
+    optimizer_backbone: torch.optim.Optimizer,
+    optimizer_beta: torch.optim.Optimizer,
+    lr_scheduler: Any,
+    lr_scheduler_beta: Any,
+) -> int:
+    """Full training resume: loads all states and returns the epoch to resume FROM (checkpoint_epoch + 1).
+
+    Restores: policy weights, EMA weights, optimizer states (Adam moments), LR scheduler states.
+    The caller should pass the returned value as epoch_offset to _run_epoch_loop so checkpoints
+    and W&B steps continue from the right epoch number.
+    """
+    import dill
+    ckpt = torch.load(checkpoint_path, map_location=device, pickle_module=dill)
+
+    policy.load_state_dict(ckpt["policy"])
+    if ema_model is not None and ckpt.get("ema_policy") is not None:
+        ema_model.load_state_dict(ckpt["ema_policy"])
+
+    optimizer_backbone.load_state_dict(ckpt["optimizer"])
+    if ckpt.get("optimizer_beta") is not None:
+        optimizer_beta.load_state_dict(ckpt["optimizer_beta"])
+
+    if ckpt.get("lr_scheduler") is not None:
+        lr_scheduler.load_state_dict(ckpt["lr_scheduler"])
+    if ckpt.get("lr_scheduler_beta") is not None:
+        lr_scheduler_beta.load_state_dict(ckpt["lr_scheduler_beta"])
+
+    resumed_epoch = int(ckpt["epoch"])
+    print(
+        f"[resume] Loaded checkpoint from epoch {resumed_epoch}: {checkpoint_path}\n"
+        f"[resume] Training will continue from epoch {resumed_epoch + 1}."
+    )
+    return resumed_epoch
 
 
 def _move_batch_to_device(batch: dict[str, Any], device: torch.device) -> dict[str, Any]:
@@ -895,6 +947,8 @@ def validate(
     )
 
     beta_counts = BetaConfusionCounts()
+    escape_counts = BetaConfusionCounts()
+    natural_counts = BetaConfusionCounts()
     beta_mae_sum = 0.0
     beta_mae_n = 0
 
@@ -917,10 +971,29 @@ def validate(
         beta_mae_sum += mae_sum
         beta_mae_n += mae_n
 
+        is_escape = batch.get("is_escape")
+        if is_escape is not None:
+            esc_mask = is_escape.reshape(-1).bool()
+            nat_mask = ~esc_mask
+            if esc_mask.any():
+                escape_counts += beta_confusion_counts_from_logits(
+                    beta_logit[esc_mask], batch["beta_label"][esc_mask],
+                    threshold=0.5, high_prob_threshold=0.9,
+                )
+            if nat_mask.any():
+                natural_counts += beta_confusion_counts_from_logits(
+                    beta_logit[nat_mask], batch["beta_label"][nat_mask],
+                    threshold=0.5, high_prob_threshold=0.9,
+                )
+
     sums, n_batches = _ddp_reduce_epoch_metrics(sums, n_batches)
     metrics = _aggregate_logs(log_keys, sums, n_batches)
     metrics.update(beta_metrics_from_counts(beta_counts, high_prob_threshold=0.9))
     metrics["beta_mae"] = beta_mae_sum / beta_mae_n if beta_mae_n > 0 else float("nan")
+    for prefix, counts in (("escape", escape_counts), ("natural", natural_counts)):
+        if counts.tp + counts.tn + counts.fp + counts.fn > 0:
+            for k, v in beta_metrics_from_counts(counts, high_prob_threshold=0.9).items():
+                metrics[f"{prefix}_{k}"] = v
     return metrics
 
 
@@ -1005,6 +1078,7 @@ def save_checkpoint(
     lr_schedule: dict[str, Any] | None = None,
     train_state: dict[str, Any] | None = None,
     metrics: dict[str, float] | None = None,
+    wandb_run_id: str | None = None,
 ) -> None:
     from dataclasses import asdict
 
@@ -1023,6 +1097,7 @@ def save_checkpoint(
         "horizon": int(policy.horizon),
         "cfg": _config_snapshot(cfg),
         "metrics": metrics or {},
+        "wandb_run_id": wandb_run_id,
         **resume_training_payload(
             lr_scheduler=lr_scheduler,
             lr_scheduler_beta=lr_scheduler_beta,
@@ -1082,6 +1157,8 @@ def _run_epoch_loop(
     """Run the training epoch loop; returns (history, best_val_score)."""
     from soda.training.checkpoint_utils import write_metrics_history
 
+    wandb_run_id: str | None = getattr(wandb_run, "id", None)
+
     def _ckpt_kwargs(metrics: dict[str, float]) -> dict[str, Any]:
         train_state: dict[str, Any] = {
             "best_val_score": best_val,
@@ -1100,6 +1177,7 @@ def _run_epoch_loop(
             "lr_schedule": lr_schedule_meta,
             "train_state": train_state,
             "metrics": metrics,
+            "wandb_run_id": wandb_run_id,
         }
 
     for epoch in range(1, num_epochs + 1):
@@ -1345,6 +1423,21 @@ def run_training(cfg: Any) -> None:
         cosine_epochs=cosine_epochs,
     )
 
+    # Full training resume: restores optimizer/scheduler/EMA states and sets epoch_offset.
+    # Must come after schedulers are constructed (they need to exist before state is loaded).
+    epoch_offset = 0
+    if train_cfg.resume_from_checkpoint:
+        epoch_offset = _resume_training_checkpoint(
+            train_cfg.resume_from_checkpoint,
+            train_cfg.device,
+            _unwrap_policy(policy),
+            ema_model,
+            optimizer_backbone,
+            optimizer_beta,
+            lr_scheduler,
+            lr_scheduler_beta,
+        )
+
     lr_sched_desc = train_cfg.lr_schedule_type
     if train_cfg.lr_schedule_type == "plateau":
         _beta_pat = train_cfg.lr_plateau_patience_beta if train_cfg.lr_plateau_patience_beta is not None else train_cfg.lr_plateau_patience
@@ -1403,6 +1496,7 @@ def run_training(cfg: Any) -> None:
         history=[],
         best_val=float("inf"),
         ddp_rank=ddp_rank,
+        epoch_offset=epoch_offset,
     )
 
     if ddp_rank == 0:

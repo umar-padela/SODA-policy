@@ -22,7 +22,10 @@ from pathlib import Path
 import numpy as np
 import modal
 
-sys.path.insert(0, str(Path(__file__).parents[5] / "modal"))
+try:
+    sys.path.insert(0, str(Path(__file__).parents[5] / "modal"))
+except IndexError:
+    sys.path.insert(0, "/root/soda-policy/modal")
 
 from modal_config import app, rollout_hierarchical, volume, image, EXPERIMENTS_MOUNT  # noqa: E402
 from soda.experiments.paths import MODAL_VOLUME_NAME, volume_relative_path  # noqa: E402
@@ -253,7 +256,7 @@ def _eval_aggregate_stage1(
 @app.local_entrypoint()
 def main(n_action_steps: int = 8) -> None:
     vol = modal.Volume.from_name(MODAL_VOLUME_NAME)
-    eval_epochs = [50, 100]
+    eval_epochs = list(range(50, 251, 50))  # [50, 100, 150, 200, 250]
 
     stage1_results = _load_existing(vol)
     already_done = _already_evaluated(stage1_results)

@@ -149,6 +149,7 @@ class LowPolicyConfig:
     termination_input: str = "bottleneck"
     termination_stop_grad: bool = True
     termination_label_smoothing: float = 0.0
+    termination_completion_weight: float | None = None  # upweight natural β=1 vs escape; None = disabled
     imagenet_init: bool = False
     escape_relabeling: bool = False  # True when dataset uses positive_negative expand-all
 
@@ -760,7 +761,11 @@ def _build_low_policy_class() -> type:
                 )
             else:
                 loss_term = termination_bce_loss(
-                    beta_logit, beta_label, pos_weight=pos_weight, label_smoothing=label_smoothing
+                    beta_logit, beta_label,
+                    pos_weight=pos_weight,
+                    label_smoothing=label_smoothing,
+                    is_escape=is_escape,
+                    completion_weight=self.cfg.termination_completion_weight,
                 )
 
             return low_policy_total_loss(

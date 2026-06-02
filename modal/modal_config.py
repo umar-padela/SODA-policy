@@ -53,6 +53,11 @@ from soda.experiments.paths import (
     VOLUME_MOUNT as EXPERIMENTS_MOUNT,
 )
 
+# BID repo path inside the container.
+BID_DIR = f"{REPO_ROOT}/third_party/bid_diffusion"
+# Volume path for BID weak policy checkpoint (downloaded once via modal_download_bid.py).
+BID_PUSHT_WEAK_CKPT = f"{EXPERIMENTS_MOUNT}/bid_checkpoints/pusht/epoch_0050.ckpt"
+
 # Back-compat aliases (prefer paths module).
 DP_FROZEN_VOLUME_DIR = str(frozen_dp_pusht_checkpoint(in_volume=True))
 DP_BASELINE_VOLUME_DIR = DP_FROZEN_VOLUME_DIR
@@ -192,6 +197,172 @@ _GPU_TRAIN_SPEC = f"{GPU_TRAIN}:{NUM_GPUS_TRAIN}" if NUM_GPUS_TRAIN > 1 else GPU
 # W&B optional — attach only when logging. Create once:
 #   modal secret create wandb WANDB_API_KEY=<key>
 _wandb_secret = modal.Secret.from_name("wandb")
+
+
+@app.function(
+    image=image,
+    gpu=None,
+    timeout=600,
+    volumes={EXPERIMENTS_MOUNT: volume},
+)
+def download_bid_checkpoints(
+    dest_dir: str = f"{EXPERIMENTS_MOUNT}/bid_checkpoints/pusht",
+) -> str:
+    """
+    Download BID's pre-trained weak Push-T checkpoint (epoch_0050, score=0.250).
+
+    Only the weak policy is needed — the strong policy is our existing Columbia DP best.ckpt.
+    Source: https://github.com/YuejiangLIU/bid_diffusion (Google Drive folder).
+    """
+    import subprocess
+    import shutil
+    from pathlib import Path
+
+    dest = Path(dest_dir)
+    dest.mkdir(parents=True, exist_ok=True)
+
+    weak_path = dest / "epoch_0050.ckpt"
+    if weak_path.is_file():
+        print(f"BID weak checkpoint already exists: {weak_path}")
+        volume.commit()
+        return str(weak_path)
+
+    # Use gdown CLI (same as BID README: gdown --folder <url> -O <dest>)
+    subprocess.run(["pip", "install", "gdown", "-q"], check=True)
+
+    tmp_dir = Path("/tmp/bid_ckpts")
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+
+    # Correct folder ID from BID README
+    folder_url = "https://drive.google.com/drive/folders/1o8rf2Lq91D_DCq7RqZVyFAP-eMcLOAP2"
+    subprocess.run(
+        ["gdown", "--folder", folder_url, "-O", str(tmp_dir)],
+        check=True,
+    )
+
+    # Move .ckpt files into dest
+    found = list(tmp_dir.rglob("*.ckpt"))
+    if not found:
+        raise FileNotFoundError(f"No .ckpt files found after gdown in {tmp_dir}")
+    for f in found:
+        target = dest / f.name
+        shutil.move(str(f), str(target))
+        print(f"  Saved: {target}")
+
+    # Create canonical epoch_0050.ckpt symlink/copy if file has long name
+    if not weak_path.exists():
+        candidates = sorted(dest.glob("*0050*.ckpt"))
+        if candidates:
+            shutil.copy(str(candidates[0]), str(weak_path))
+            print(f"  Canonical weak ckpt: {weak_path}")
+
+    volume.commit()
+    print(f"BID checkpoints ready in {dest}")
+    return str(weak_path)
+
+
+@app.function(
+    image=image,
+    gpu="A100-80GB",   # BID batches N=16 samples × n_envs; needs more VRAM than A10G
+    timeout=14400,
+    volumes={EXPERIMENTS_MOUNT: volume},
+    secrets=[_wandb_secret],
+)
+def eval_bid_pusht(
+    *,
+    checkpoint: str,
+    reference: str,
+    noise: float = 0.0,
+    n_test: int = 25,
+    n_samples: int = 16,
+    n_mode: int = 3,
+    decay: float = 0.9,
+    output_dir: str,
+    noise_rho: float = 0.9,
+) -> dict:
+    """
+    Native BID evaluation on Push-T using our own Columbia DP image runner.
+
+    BID's eval_bid.py subprocess approach doesn't work with the image-based DP
+    (PushTImageRunner has no set_sampler). Instead, we implement BID natively:
+    load strong + weak DP checkpoints, wrap with BIDPolicy, run via our runner.
+
+    Returns per-episode scores compatible with the noise study JSON format.
+    """
+    import numpy as np
+    from pathlib import Path
+
+    from soda.eval.bid_sampler import BIDPolicy
+    from soda.eval.dp_runner import build_pusht_image_runner
+    from soda.eval.policy_loaders import load_dp_image_policy_and_cfg
+    from soda.eval.runner_common import resolve_test_start_seed, serialize_runner_log
+    from soda.training.dp_config import merge_eval_yaml_into_ckpt_cfg
+
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "media").mkdir(parents=True, exist_ok=True)
+
+    device = "cuda:0"
+    strong, _settings, ckpt_cfg = load_dp_image_policy_and_cfg(checkpoint, device=device)
+    strong.n_action_steps = 1
+
+    # Load weak policy only if reference is a compatible image-based checkpoint.
+    # BID's provided checkpoints are lowdim/keypoints — incompatible with our image CNN.
+    # Without a weak policy, BID runs positive-only forward contrast (still beats vanilla).
+    weak = None
+    if reference:
+        try:
+            from diffusion_policy.policy.diffusion_unet_hybrid_image_policy import DiffusionUnetHybridImagePolicy
+            weak, _, _ = load_dp_image_policy_and_cfg(reference, device=device)
+            if not isinstance(weak, DiffusionUnetHybridImagePolicy):
+                print(f"Weak policy is not an image policy ({type(weak).__name__}) — running BID without negative contrast")
+                weak = None
+            else:
+                weak.n_action_steps = 1
+                print(f"Loaded weak policy: {reference}")
+        except Exception as e:
+            print(f"Could not load weak policy ({e}) — running BID without negative contrast")
+            weak = None
+
+    bid_policy = BIDPolicy(strong, weak, n_samples=n_samples, n_mode=n_mode, decay=decay)
+
+    seed = resolve_test_start_seed(100000, ckpt_cfg)
+    runner = build_pusht_image_runner(
+        ckpt_cfg,
+        out_dir,
+        n_test=n_test,
+        n_test_vis=n_test,   # record all episodes (score in filename)
+        n_action_steps=1,
+        max_steps=300,
+        test_start_seed=seed,
+        noise_eta=noise,
+        noise_rho=noise_rho,
+    )
+
+    runner_log = runner.run(bid_policy)
+    soda_metrics = runner_log.pop("soda_metrics", {})
+
+    per_episode_scores = [
+        float(runner_log.get(f"test/sim_max_reward_{seed + i}", 0.0))
+        for i in range(n_test)
+    ]
+    mean_score = float(np.mean(per_episode_scores)) if per_episode_scores else 0.0
+    std_score = float(np.std(per_episode_scores)) if per_episode_scores else 0.0
+
+    volume.commit()
+    return {
+        "policy": "bid",
+        "noise_eta": float(noise),
+        "noise_rho": noise_rho,
+        "n_action_steps": 1,
+        "n_episodes": len(per_episode_scores),
+        "mean_score": mean_score,
+        "std_score": std_score,
+        "per_episode_scores": per_episode_scores,
+        "checkpoint": str(checkpoint),
+        "reference": str(reference),
+        "metrics": soda_metrics,
+    }
 
 
 def _run(
@@ -440,6 +611,9 @@ def eval_run(
     record_video: bool = True,
     invoke_command: str | None = None,
     output_dir: str | None = None,
+    noise_eta: float = 0.0,
+    noise_rho: float = 0.9,
+    noise_scale_by_magnitude: bool = False,
 ) -> dict:
     """
     Generic Push-T eval on Modal: load yaml → roll out → overlap @ 125–300 (25-step grid).
@@ -472,6 +646,9 @@ def eval_run(
         ckpt_slug=ckpt_slug,
         record_video=record_video,
         run_readme=run_readme,
+        noise_eta=noise_eta,
+        noise_rho=noise_rho,
+        noise_scale_by_magnitude=noise_scale_by_magnitude,
     )
     cfg = build_eval_config_from_yaml(config_path, cli=cli)
 
@@ -813,16 +990,21 @@ def rollout_hierarchical(
     *,
     high_checkpoint: str | None = None,
     low_checkpoint: str | None = None,
+    weak_low_checkpoint: str | None = None,
     n_episodes: int = 5,
     test_start_seed: int = 100000,
     n_action_steps: int = 8,
     beta_transition: float | None = None,
     open_loop: bool = False,
     duration_termination: bool = False,
+    high_monitors_every_step: bool = False,
     max_steps: int = 300,
     output_dir: str | None = None,
     no_video: bool = False,
     video_failure_threshold: float | None = 20.0,
+    noise_eta: float = 0.0,
+    noise_rho: float = 0.9,
+    noise_scale_by_magnitude: bool = False,
     invoke_command: str | None = None,
 ) -> dict:
     """
@@ -879,10 +1061,17 @@ def rollout_hierarchical(
     print(f"  π_high: {high_ckpt}")
     print(f"  π_low:  {low_ckpt}")
 
+    weak_low_ckpt = (
+        resolve_volume_path(weak_low_checkpoint)
+        if weak_low_checkpoint is not None
+        else None
+    )
+
     results = run_hierarchical_rollouts(
         config_path=resolved_config,
         high_checkpoint=high_ckpt,
         low_checkpoint=low_ckpt,
+        weak_low_checkpoint=weak_low_ckpt,
         device="cuda:0",
         n_episodes=n_episodes,
         test_start_seed=test_start_seed,
@@ -890,10 +1079,14 @@ def rollout_hierarchical(
         beta_transition=beta_transition,
         open_loop=open_loop,
         duration_termination=duration_termination,
+        high_monitors_every_step=high_monitors_every_step,
         max_steps=max_steps,
         output_dir=out_dir,
         record_video=not no_video,
         video_overlap_threshold=None if no_video else video_failure_threshold,
+        noise_eta=noise_eta,
+        noise_rho=noise_rho,
+        noise_scale_by_magnitude=noise_scale_by_magnitude,
     )
 
     volume.commit()

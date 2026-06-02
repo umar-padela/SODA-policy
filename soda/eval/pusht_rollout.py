@@ -144,12 +144,15 @@ def rollout_episode(
     max_steps: int | None = None,
     show_progress: bool = False,
     episode_label: str = "",
+    noise_eta: float = 0.0,
+    noise_rho: float = 0.9,
 ) -> EpisodeMetrics:
     """
     Run one episode and return overlap metrics at step checkpoints.
 
     Replan after each ``predict_action`` chunk (``n_action_steps=1`` = closed-loop).
     """
+    from soda.eval.action_noise import TemporallyCorrelatedNoise
     from soda.eval.metrics import compute_episode_metrics
 
     env.seed(seed)
@@ -158,6 +161,11 @@ def rollout_episode(
         torch.cuda.manual_seed(seed)
     obs = env.reset()
     policy.reset()
+
+    noise = TemporallyCorrelatedNoise(
+        eta=noise_eta, rho=noise_rho, n_envs=1, action_dim=2
+    )
+    noise.reset()
 
     done = False
     step_budget = max_steps or getattr(env, "max_episode_steps", None) or 300
@@ -207,6 +215,7 @@ def rollout_episode(
             action_dict = policy.predict_action(obs_dict)
 
         action = _actions_for_env(action_dict, n_action_steps)
+        action = noise.apply_to_chunk(action)
         obs, _reward, done, _info = env.step(action)
         done = bool(done)
         _sync_step_progress()
@@ -240,6 +249,8 @@ def run_pusht_rollouts(
     n_action_steps: int = 1,
     checkpoints: tuple[int, ...] = DEFAULT_OVERLAP_CHECKPOINTS,
     show_progress: bool = True,
+    noise_eta: float = 0.0,
+    noise_rho: float = 0.9,
 ) -> dict[str, Any]:
     """
     Roll out ``policy`` on Push-T and aggregate metrics.
@@ -282,6 +293,8 @@ def run_pusht_rollouts(
                 max_steps=max_steps,
                 show_progress=show_progress,
                 episode_label=ep_label,
+                noise_eta=noise_eta,
+                noise_rho=noise_rho,
             )
             episodes.append(ep)
             if progress_mode == "log":

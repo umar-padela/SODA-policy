@@ -29,6 +29,8 @@ def _patch_async_vector_env() -> None:
       2. VectorEnv.reset() now calls reset_async(seed=, return_info=, options=)
          and reset_wait(timeout=, seed=, return_info=, options=) — Columbia's
          signatures take neither.
+      3. gym 0.23 concatenate() asserts items is list/tuple but Columbia passes
+         an OrderedDict of arrays — patch concatenate to handle dicts.
     """
     from diffusion_policy.gym_util import async_vector_env as _ave
 
@@ -59,6 +61,21 @@ def _patch_async_vector_env() -> None:
         return _orig_reset_wait(self, timeout=timeout)
 
     _ave.AsyncVectorEnv.reset_wait = _patched_reset_wait
+
+    # Fix 3: gym 0.23 concatenate() rejects dict observations — patch to handle them
+    import gym.vector.utils.numpy_utils as _nu
+    import numpy as np
+
+    _orig_concatenate = _nu.concatenate
+
+    def _patched_concatenate(items, out, space):
+        if not isinstance(items, (list, tuple)):
+            # items is an OrderedDict of stacked arrays (gym 0.23 path)
+            # just return it directly since it's already concatenated
+            return items
+        return _orig_concatenate(items, out, space)
+
+    _nu.concatenate = _patched_concatenate
 
 
 _patch_async_vector_env()

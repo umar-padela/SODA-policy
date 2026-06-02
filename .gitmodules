@@ -4,3 +4,6 @@
 [submodule "third_party/love"]
 	path = third_party/love
 	url = https://github.com/yidingjiang/love.git
+[submodule "third_party/bid_diffusion"]
+	path = third_party/bid_diffusion
+	url = https://github.com/YuejiangLIU/bid_diffusion

@@ -56,6 +56,9 @@ def rollout_hierarchical_episode(
     output_dir: Path | None = None,
     record_video: bool = True,
     video_overlap_threshold: float | None = None,
+    noise_eta: float = 0.0,
+    noise_rho: float = 0.9,
+    noise_scale_by_magnitude: bool = False,
 ) -> HierarchicalEpisodeResult:
     """
     Roll π_high + π_low for one seeded episode; return metrics + annotated MP4.
@@ -78,6 +81,10 @@ def rollout_hierarchical_episode(
     obs = env.reset()
     policy.reset()
 
+    from soda.eval.action_noise import TemporallyCorrelatedNoise
+    noise = TemporallyCorrelatedNoise(eta=noise_eta, rho=noise_rho, n_envs=1, action_dim=2)
+    noise.reset()
+
     frames_raw: list[np.ndarray] = [capture_sim_rgb(env)]
     overlays: list[LowPolicyOverlayInfo] = [LowPolicyOverlayInfo()]
     option_ids: list[int] = [0]
@@ -98,6 +105,7 @@ def rollout_hierarchical_episode(
         action = action_dict["action"].detach().cpu().numpy()
         if action.ndim == 3 and action.shape[0] == 1:
             action = action[0]
+        action = noise.apply_to_chunk(action, scale_by_magnitude=noise_scale_by_magnitude)
 
         obs, _reward, done, _info = env.step(action)
         done = bool(done)
@@ -147,13 +155,14 @@ def rollout_hierarchical_episode(
         ]
         out_dir = output_dir or Path("experiments/pusht/hierarchical_rollout")
         out_dir.mkdir(parents=True, exist_ok=True)
-        video_path = out_dir / f"ep{episode_idx:04d}_seed{seed}.mp4"
+        score_int = int(round(max_overlap))
+        video_path = out_dir / f"ep{episode_idx:04d}_seed{seed}_score{score_int:03d}.mp4"
         # Repeat each frame 3x so a 10-fps sim produces a 30-fps file that plays
         # correctly in all players (mp4v at low fps is misread by many decoders).
         repeat = max(1, round(30 / fps))
         frames_30fps = [f for f in annotated for _ in range(repeat)]
         compile_frames_to_mp4(frames_30fps, fps * repeat, video_path)
-        summary_path = out_dir / f"ep{episode_idx:04d}_seed{seed}.json"
+        summary_path = out_dir / f"ep{episode_idx:04d}_seed{seed}_score{score_int:03d}.json"
         summary_path.write_text(json.dumps(metrics, indent=2), encoding="utf-8")
         print(f"  Saved: {video_path}")
 
@@ -177,6 +186,7 @@ def run_hierarchical_rollouts(
     config_path: Path,
     high_checkpoint: Path,
     low_checkpoint: Path,
+    weak_low_checkpoint: Path | None = None,
     device: str = "cuda:0",
     n_episodes: int = 5,
     test_start_seed: int = 100000,
@@ -184,12 +194,16 @@ def run_hierarchical_rollouts(
     beta_transition: float | None = None,
     open_loop: bool = False,
     duration_termination: bool = False,
+    high_monitors_every_step: bool = False,
     max_steps: int = 300,
     legacy_test: bool = True,
     output_dir: Path | None = None,
     record_video: bool = True,
     video_overlap_threshold: float | None = None,
     external_beta: Any | None = None,
+    noise_eta: float = 0.0,
+    noise_rho: float = 0.9,
+    noise_scale_by_magnitude: bool = False,
 ) -> list[HierarchicalEpisodeResult]:
     """
     Load SODA hierarchical policy and roll out ``n_episodes`` seeded episodes.
@@ -247,6 +261,13 @@ def run_hierarchical_rollouts(
             high_checkpoint=high_checkpoint,
             low_checkpoint=low_checkpoint,
         )
+        if weak_low_checkpoint is not None:
+            from soda.eval.policy_loaders import load_low_policy_from_checkpoint
+            pi_low_weak = load_low_policy_from_checkpoint(
+                weak_low_checkpoint, device=device, eval_cfg=cfg
+            )
+            policy._pi_low_weak = pi_low_weak
+            policy._executor = None  # force executor rebuild with BIDSampler
 
     # Override n_action_steps from caller (load_soda_policy_and_cfg uses yaml default)
     policy.config = dc_replace(policy.config, n_action_steps=n_action_steps)
@@ -254,7 +275,12 @@ def run_hierarchical_rollouts(
         policy.config = dc_replace(policy.config, open_loop=True)
         policy.config = dc_replace(policy.config, beta_transition=beta_transition if beta_transition is not None else 2.0)
     elif duration_termination:
-        policy.config = dc_replace(policy.config, duration_termination=True, beta_transition=2.0)
+        policy.config = dc_replace(
+            policy.config,
+            duration_termination=True,
+            beta_transition=2.0,
+            high_monitors_every_step=high_monitors_every_step,
+        )
     elif beta_transition is not None:
         policy.config = dc_replace(policy.config, beta_transition=beta_transition)
 
@@ -278,6 +304,9 @@ def run_hierarchical_rollouts(
             output_dir=output_dir,
             record_video=record_video,
             video_overlap_threshold=video_overlap_threshold,
+            noise_eta=noise_eta,
+            noise_rho=noise_rho,
+            noise_scale_by_magnitude=noise_scale_by_magnitude,
         )
         results.append(result)
 

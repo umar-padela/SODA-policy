@@ -42,15 +42,44 @@ def termination_bce_loss(
     *,
     pos_weight: float | torch.Tensor | None = None,
     label_smoothing: float = 0.0,
+    is_escape: torch.Tensor | None = None,
+    completion_weight: float | None = None,
 ) -> torch.Tensor:
     """BCE on termination logits vs binary ``beta_label`` with optional label smoothing.
 
     Label smoothing maps 0 → ε and 1 → 1−ε, preventing logit saturation while
     keeping binary terminal-state semantics.
+
+    When ``completion_weight`` and ``is_escape`` are provided, natural β=1 examples
+    (not escape, beta_label=1) are upweighted by ``completion_weight``. With
+    escape_relabeling each anchor generates 2*(K-1) escape β=1 samples vs 1 natural
+    β=1 sample; completion_weight ≈ 2*(K-1)*avg_len equalizes their gradient contributions.
+    When using completion_weight, pos_weight should be left None (balance is handled
+    per-example instead).
     """
     label = beta_label.float()
     if label_smoothing > 0.0:
         label = label * (1.0 - label_smoothing) + (1.0 - label) * label_smoothing
+
+    if completion_weight is not None and is_escape is not None:
+        if beta_logit.ndim > 1:
+            beta_logit = beta_logit.squeeze(-1)
+        per_elem = F.binary_cross_entropy_with_logits(beta_logit, label, reduction="none")
+
+        # Start with per-element weight = 1.0, then apply pos_weight to all positives,
+        # then additionally multiply natural β=1 examples by completion_weight.
+        # With pos_weight≈0.46 and completion_weight=34:
+        #   β=0 → 1.0,  escape β=1 → 0.46,  natural β=1 → 15.6  (≈ equal thirds)
+        w = torch.ones_like(per_elem)
+        if pos_weight is not None:
+            pw = pos_weight if torch.is_tensor(pos_weight) else torch.tensor(
+                float(pos_weight), device=per_elem.device, dtype=per_elem.dtype
+            )
+            w = torch.where(beta_label >= 0.5, w * pw, w)
+        is_natural_completion = (~is_escape) & (beta_label >= 0.5)
+        w = torch.where(is_natural_completion, w * float(completion_weight), w)
+        return (per_elem * w).mean()
+
     return termination_bce_from_logits(beta_logit, label, pos_weight=pos_weight)
 
 
