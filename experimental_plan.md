@@ -19,19 +19,21 @@ The baseline is Columbia Diffusion Policy (DP), which uses a single monolithic d
 
 This study addresses the following questions, in dependency order:
 
-**Q1 (kernel_size_study)**: Among U-Net temporal kernel sizes {5, 7, 9}, which yields the best diffusion policy for Push-T option segments?
+**Q1 (kernel_size_study)**: Among U-Net temporal kernel sizes {5, 7, 9}, which yields the best diffusion policy for Push-T option segments? — **CONCLUDED**: k=9 (epoch_0450, mean=97.97%, std=12.99%) wins. Used as backbone for all downstream experiments.
 
-**Q2a (termination_study/stage1a)**: Does using policy-generated action plans (DDIM-5) for the bottleneck outperform using expert actions? (Train-inference distribution gap)
+**Q2a (termination_study/stage1a)**: Does using policy-generated action plans (DDIM-5) for the bottleneck outperform using expert actions? (Train-inference distribution gap) — **CONCLUDED**: Expert actions win (88.96% vs 84.11%). DDIM bottleneck does not help at this stage.
 
-**Q2b (termination_study/stage1b)**: Does training obs-based β with escape relabeling (wrong-option examples → β=1) improve over boundary-only training? (Completion vs completion+escape)
+**Q2b (termination_study/stage1b)**: Does training obs-based β with escape relabeling (wrong-option examples → β=1) improve over boundary-only training? (Completion vs completion+escape) — **CONCLUDED**: Boundary-only (`obs_positive`) wins (85.99% vs 74.92%). Escape relabeling hurts on Push-T.
 
-**Q3 (termination_study/stage2)**: Does combining the best bottleneck source (from Q2a) with the best obs training signal (from Q2b) via feature concatenation outperform either alone?
+**Q3 (termination_study/stage2)**: Does combining the best bottleneck source (from Q2a) with the best obs training signal (from Q2b) via feature concatenation outperform either alone? — **SKIPPED**: Duration termination (97.97%) established as winner before Stage 2 could run; not pursued.
 
-**Q4 (termination_study/stage3)**: Does joint training (stop_grad=False, λ=0.01) improve over frozen for each of the above configurations?
+**Q4 (termination_study/stage3)**: Does joint training (stop_grad=False, λ=0.01) improve over frozen for each of the above configurations? — **CONCLUDED**: Joint training helps `bottleneck_ddim_positive` (84.11%→89.65%) but hurts `bottleneck_expert` (88.96%→87.32%). Best joint result (89.65%) still trails duration termination by 8+ points.
 
-**Q5 (receding_horizon_study)**: For the best overall SODA policy, what receding-horizon window size (n_action_steps) maximizes Push-T performance?
+**Q5 (receding_horizon_study)**: For the best overall SODA policy, what receding-horizon window size (n_action_steps) maximizes Push-T performance? — **CONCLUDED**: n=8 is optimal (mean=97.97%, std=13.00%).
 
-**Q6 (comparison_study)**: Does the best SODA policy (best kernel, best termination, best n_action_steps) outperform the Columbia DP baseline on Push-T?
+**Q6 (comparison_study)**: Does the best SODA policy (best kernel, best termination, best n_action_steps) outperform the Columbia DP baseline on Push-T? — **CONCLUDED**: SODA k=9 (97.97%) significantly outperforms DP k=5 (89.04%), p=0.0002 (Mann-Whitney ***). SODA k=5 vs DP k=5 is not significant (p=0.47).
+
+**Q7 (noise_study)**: Does hierarchical decomposition (SODA) improve robustness under temporally-correlated action noise? Does BID test-time sampling help DP, SODA, or both? — **IN PROGRESS**
 
 ---
 
@@ -99,6 +101,8 @@ We expect k=9 (current default in soda_supervised.yaml) to perform well given ou
 
 The kernel with the highest best-epoch mean_score is used as the backbone for all termination_study runs. The best.ckpt from that kernel is the starting checkpoint for termination training.
 
+> **CONCLUDED** — k=9 (epoch_0450, mean=97.97%, std=12.99%) wins over k=7 (96.69%) and k=5 (93.38%). All downstream experiments use the k=9 ep450 checkpoint.
+
 ---
 
 ## 4. Experiment 2: termination_study
@@ -137,6 +141,8 @@ Duration termination uses the model's predicted action length to decide when to 
 
 **Decision**: Winner → `bottleneck_best` used as the bottleneck variant in stage 2 and 3.
 
+> **CONCLUDED** — `bottleneck_expert` wins (epoch=200, mean=88.96%) over `bottleneck_ddim_positive` (epoch=50, mean=84.11%). Expert actions outperform DDIM-generated actions for completion-only training.
+
 ---
 
 ### Stage 1b: Escape Training Signal Comparison (Frozen Backbone)
@@ -157,6 +163,8 @@ Tests whether escape relabeling (expand-all: K samples per anchor, K-1 with wron
 
 **Decision**: Separate winners for bottleneck and obs sides → `bottleneck_best` and `obs_best` for stage 2.
 
+> **CONCLUDED** — `obs_positive` wins (epoch=100, mean=85.99%) over `obs_positive_negative` (74.92%) and `bottleneck_ddim_positive_negative` (78.27%). Escape relabeling degrades performance on Push-T; boundary-only training is the better signal.
+
 ---
 
 ### Stage 2: Best Combination (Frozen Backbone)
@@ -172,6 +180,8 @@ Tests whether escape relabeling (expand-all: K samples per anchor, K-1 with wron
 
 **Decision**: Best variant → `frozen_best` for stage 3.
 
+> **SKIPPED** — Stage 2 was not run. Duration termination (97.97%) was established as the definitive winner after Stage 1 results; the `both` combination run was not pursued.
+
 ---
 
 ### Stage 3: Joint Training (stop_grad=False)
@@ -186,6 +196,8 @@ Repeat stages 1a, 1b, and 2 with β gradients flowing into the backbone (stop_gr
 **Runs**: `bottleneck_expert_joint`, `bottleneck_ddim_positive_joint`, `obs_positive_joint`, `obs_positive_negative_joint` (all from 1a+1b, run in parallel), then `both_joint` after 1a+1b decisions are in. Note: `bottleneck_best_joint` and `obs_best_joint` are not separate runs — they are whichever 1a/1b joint runs won, so stage 2 only adds `both_joint` as a new training session.
 
 **Decision**: For each frozen configuration, compare joint vs frozen. If joint does not improve, use the frozen checkpoint. Best joint or frozen result → `term_best` for comparison_study.
+
+> **CONCLUDED** — Joint training improves `bottleneck_ddim_positive` (84.11%→89.65% at ep50) but degrades `bottleneck_expert` (88.96%→87.32%). `obs_positive_joint` (84.19%) trails frozen `obs_positive` (85.99%). `obs_positive_negative_joint` (71.75%) and `bottleneck_ddim_pn_joint` (73.52%) are both worse. `both_joint` was not run. Best joint result (89.65%) still trails duration termination (97.97%) by >8 points. **Overall termination study conclusion: duration termination is the best mechanism for Push-T. All learned β variants underperform by ≥8 points and are not adopted.**
 
 ---
 
@@ -214,6 +226,8 @@ Repeat stages 1a, 1b, and 2 with β gradients flowing into the backbone (stop_gr
 - Results: `/experiments/final_experiments/pusht/termination_study/stage4/obs_positive_negative_separate/`
 
 **Comparison baseline**: `obs_positive_negative` (stage 1b) — same training signal, same MLP, but obs encoder is frozen DP ResNet. If stage 4 outperforms stage 1b, a dedicated ResNet adds value beyond the shared DP representation.
+
+> **DEFUNCT** — Stage 4 was not run. Duration termination is the confirmed winner for Push-T; a standalone ResNet β is not expected to close the ~8 point gap over duration termination. Closed out; focus moves to noise_study (Stage 5).
 
 ---
 
@@ -252,6 +266,8 @@ We expect n_action_steps ∈ {6, 8} to perform best, consistent with Columbia DP
 
 The n_action_steps with the highest mean_score (ties broken by smaller value) is used for **comparison_study**.
 
+> **CONCLUDED** — n=8 is optimal (mean=97.97%, std=13.00%). n=6 is the closest alternative (96.00%). Open-loop (81.65%) and large windows (n=16: 87.68%) underperform. n=8 used for comparison_study.
+
 ---
 
 ## 6. Experiment 4: comparison_study
@@ -273,6 +289,8 @@ Beyond mean score, we will examine:
 - Per-episode score distribution (histogram, violin plot)
 - Option sequence length and transition frequency in SODA rollouts (from overlay JSONs)
 - Whether SODA fails on specific option transitions (e.g., reposition→push boundary)
+
+> **CONCLUDED** — SODA k=9 (97.97%, std=12.99%) significantly outperforms Columbia DP k=5 (89.04%, std=22.58%), Mann-Whitney p=0.0002 (***), t-test p=0.019 (*). SODA k=5 (93.38%) vs DP k=5 (89.04%) is not significant (p=0.47). Hierarchical decomposition provides measurable performance gains at matched kernel; the larger k=9 also reduces variance substantially.
 
 ---
 
@@ -374,6 +392,8 @@ high_policy:
 
 If all-frames π_high achieves comparable or better option classification accuracy on segment-start val frames AND improves downstream rollout scores (fewer stuck episodes, cleaner option transitions), adopt as the default training mode.
 
+> **CONCLUDED (negative)** — all_frames π_high achieves only 77.62% downstream rollout score vs 97.97% with the segment-start policy (`high_starts_prev_opt`). Not adopted. The fixed high policy trained on segment starts with prev-option conditioning (92% option accuracy) is used throughout all experiments.
+
 ---
 
 ## 11. Anticipated Failure Modes
@@ -384,6 +404,155 @@ If all-frames π_high achieves comparable or better option classification accura
 
 3. **Joint training destabilizes diffusion**: If stage 3 diffusion val_loss increases > 20% vs stage 2 starting point, λ=0.01 is too high. Mitigation: reduce to λ=0.005 and re-run.
 
-4. **Duration termination outperforms all β variants**: If no β variant exceeds duration termination baseline + 1 std, the β head does not add value for Push-T. This is a valid negative result — report it and use duration termination for comparison_study.
+4. **Duration termination outperforms all β variants**: If no β variant exceeds duration termination baseline + 1 std, the β head does not add value for Push-T. This is a valid negative result — report it and use duration termination for comparison_study. *(Observed — confirmed negative result.)*
 
-5. **SODA underperforms DP**: If the best SODA policy does not match DP performance, analyze where rollouts fail (which option transitions, which episode types). The hierarchical decomposition may not benefit a task as simple as Push-T, which is also a valid scientific finding.
+5. **SODA underperforms DP**: If the best SODA policy does not match DP performance, analyze where rollouts fail (which option transitions, which episode types). The hierarchical decomposition may not benefit a task as simple as Push-T, which is also a valid scientific finding. *(Not observed — SODA k=9 significantly outperforms DP.)*
+
+---
+
+## 12. Experiment 5: noise_study — Noise Robustness (DP vs BID vs SODA vs SODA-BID)
+
+**Status**: Scripts complete, runs pending (no result JSONs yet).
+
+### Research Question (Q7)
+
+Does hierarchical decomposition confer robustness to temporally-correlated action noise? Does BID test-time ensemble sampling provide additional robustness for DP, SODA, or both?
+
+### Background
+
+The poster identifies two open questions: (1) cannot isolate hierarchy from kernel scaling without a DP k=9 control, and (2) BID has not been evaluated under the same protocol as SODA/DP. The noise study addresses both by holding kernel fixed at k=5 and comparing all four policies under matched conditions.
+
+### Noise Model
+
+AR(1) temporally-correlated Gaussian perturbation applied to executed actions before `env.step()`, matching Liu et al. 2024 (BID paper):
+
+```
+ε_t = ρ · ε_{t-1} + η · w_t,   w_t ~ N(0, I),   ρ = 0.9
+```
+
+where η is the noise scale. Swept over η ∈ {0.0, 1.0}.
+
+### Policies
+
+| Tag | Description | Checkpoints |
+|-----|-------------|-------------|
+| `dp` | Columbia DP k=5, n_action_steps=1 | `dp_baselines/pusht_image_cnn_train0/best.ckpt` |
+| `bid` | BID on DP k=5 (n_samples=16, n_mode=3, decay=0.9) | DP ckpt + `weak_policy/dp_weak/checkpoints/epoch_0015.ckpt` |
+| `soda` | SODA k=5 ep350, n_action_steps=1, duration termination | `final_experiments/pusht/kernel_size_study/k5/epoch_0350.ckpt` + `high_starts_prev_opt/best.ckpt` |
+| `soda_bid` | BID applied to SODA π_low (k5 strong + k5 weak reference) | Same SODA ckpts + `weak_policy/k5_weak/epoch_0015.ckpt` |
+
+**Why k=5**: creates a fair 4-way comparison. DP k=5 is the Columbia baseline; SODA k=5 is the matched-kernel SODA. This avoids confounding noise robustness results with kernel-size differences.
+
+**Why n_action_steps=1**: BID resamples actions at every step (it requires a full diffusion denoising pass per env step to select among proposals). Applying n_action_steps=1 uniformly across all four conditions makes the comparison fair.
+
+### Episodes
+
+25 per condition (extendable to 50 via `--n-episodes 50`; incremental JSON format deduplicates by seed so re-runs only add missing episodes).
+
+### Scripts
+
+```bash
+# Run all 8 conditions (4 policies × 2 noise levels)
+modal run experiments/final_experiments/pusht/noise_study/modal_eval_bid_comparison.py \
+  --soda-low-checkpoint /experiments/final_experiments/pusht/kernel_size_study/k5/epoch_0350.ckpt \
+  --soda-weak-checkpoint /experiments/weak_policy/k5_weak/epoch_0015.ckpt \
+  --soda-high-checkpoint /experiments/final_experiments/pusht/high_study/high_starts_prev_opt/best.ckpt
+
+# Extend to 50 episodes
+modal run experiments/final_experiments/pusht/noise_study/modal_eval_bid_comparison.py \
+  --soda-low-checkpoint ... --n-episodes 50
+
+# Plot grouped bar chart
+python experiments/final_experiments/pusht/noise_study/plot_noise_study.py
+```
+
+### Expected Outcomes
+
+1. **η=0.0**: All four policies should replicate their no-noise baselines (DP ≈89%, SODA ≈93% at k=5). BID may marginally improve DP via ensemble denoising even without noise.
+2. **η=1.0**: DP is expected to degrade most; BID partially recovers DP performance via test-time ensemble selection. SODA hierarchy may confer additional robustness: when a chunk is corrupted, duration termination exits early (predicted duration shortens under noise) and π_high resamples a new option.
+3. **SODA-BID** is expected to be the most robust: combines BID's per-step ensemble selection with SODA's semantic replanning.
+
+### Decision Rule
+
+If SODA-BID score at η=1.0 ≥ BID score + 1 std → hierarchy adds robustness beyond BID alone (positive finding). If all four degrade similarly → noise robustness is not a differentiating factor for SODA on Push-T (valid negative result).
+
+### Output Files
+
+```
+experiments/final_experiments/pusht/noise_study/
+  dp_eta0.0.json          soda_eta0.0.json
+  dp_eta1.0.json          soda_eta1.0.json
+  bid_eta0.0.json         soda_bid_eta0.0.json
+  bid_eta1.0.json         soda_bid_eta1.0.json
+  plot_noise_study.png
+```
+
+---
+
+## 13. Experiment 6: unsupervised_study — Push-T with LOVE Option Discovery
+
+**Status**: Not started. Awaiting LOVE label generation (Neetish).
+
+### Research Question
+
+Can SODA achieve comparable performance using unsupervised option labels from LOVE versus the heuristic supervised labels from E1? This directly tests whether the hierarchical structure generalizes beyond manually-designed option boundaries.
+
+### Setup
+
+Same training formulation as E1 (supervised Push-T), with one change: `task.dataset.option_id_key: option_id_unsupervised`. Both π_low and π_high are retrained from scratch using LOVE-generated segment labels.
+
+**π_low**: k=5 U-Net, no β head, 500 epochs, cosine LR schedule, duration termination, checkpoint every 50 epochs. Config: `configs/pusht_unsupervised/unsupervised_k5_no_beta.yaml`.
+
+**π_high**: segment-start observations + prev-option conditioning (same approach as the winning supervised `high_starts_prev_opt`). 1000 epochs, checkpoint every 5 epochs. Config: `configs/pusht_unsupervised/unsupervised_high_starts_prev_opt.yaml`.
+
+**No ordering constraint**: π_low and π_high can be trained in parallel. π_high uses a fresh ResNet initialized from ImageNet weights (`imagenet_init: true`) — it does not depend on the π_low checkpoint for weight initialization.
+
+**Why k=5**: Matches the E1 supervised baseline at the same kernel size, making the supervised vs. unsupervised comparison clean (no kernel confound).
+
+**Why retrain π_high**: LOVE may produce a different number of options than the supervised heuristic (3). The option embedding dimension must match between π_low and π_high, so reusing the supervised `high_starts_prev_opt` checkpoint is not possible if `num_options` differs.
+
+### Prerequisite
+
+LOVE labels must be written into `data/raw/pusht/pusht.zarr` as `option_id_unsupervised`. See `soda/option_discovery/unsupervised/love_adapter/` and `configs/pusht_unsupervised/README.md`.
+
+### Training Commands
+
+```bash
+# Train π_low and π_high in parallel (no ordering dependency — π_high uses ImageNet init)
+modal run --detach modal/modal_train_low.py \
+  --config-name unsupervised_k5_no_beta \
+  --task pusht_unsupervised \
+  --hydra-overrides "train_low.output_dir=/experiments/final_experiments/pusht/unsupervised_study/low train_low.wandb_run_name=unsupervised_k5_no_beta_500ep"
+
+modal run --detach modal/modal_train_high.py \
+  --config-name unsupervised_high_starts_prev_opt \
+  --task pusht_unsupervised
+```
+
+### Eval Protocol
+
+Identical to E1 / comparison_study: 50 episodes, seed=100000, max_steps=300, n_action_steps=8, duration termination. Epoch sweep over all 10 low-policy checkpoints (ep50, ep100, ..., ep500). High policy is fixed to `unsupervised_study/high/best.ckpt` throughout the epoch sweep.
+
+### Expected Outcomes
+
+1. If LOVE segments are semantically coherent and SODA performs within 5 points of the supervised result (≥88%), it demonstrates that unsupervised option discovery is a viable alternative to manual labeling.
+2. If LOVE segments are noisy (high intra-option variance, short mean length), π_low will struggle to learn a clean option-conditioned policy and performance will lag E1 significantly.
+3. Report LOVE segment statistics (num_options, mean segment length, segment length std) alongside scores to contextualize the result.
+
+### Decision Rule
+
+Compare best-epoch mean score for unsupervised E3 vs. supervised k=5 E1 (93.38%). If E3 ≥ E1 − 5pp: viable negative result (LOVE roughly matches supervised labeling). If E3 < E1 − 5pp: unsupervised labels produce a qualitatively weaker policy; analyze whether the gap is due to segment noise or option count mismatch.
+
+### Output Files
+
+```
+experiments/final_experiments/pusht/unsupervised_study/
+  low/
+    best.ckpt
+    epoch_0050.ckpt  ...  epoch_0500.ckpt
+  high/
+    best.ckpt
+  unsupervised_results.json
+  plot_unsupervised_vs_epoch_t300.png
+  plot_unsupervised_vs_supervised_comparison.png
+```

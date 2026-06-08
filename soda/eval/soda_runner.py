@@ -110,7 +110,7 @@ class SodaHierarchicalRunner:
         import torch
 
         from diffusion_policy.common.pytorch_util import dict_apply
-        from soda.eval.action_noise import TemporallyCorrelatedNoise
+        from soda.eval.action_noise import VelocityProportionalNoise
 
         device = policy.device
         env = self._inner.env
@@ -122,9 +122,7 @@ class SodaHierarchicalRunner:
         all_video_paths: list[Any] = [None] * n_inits
         all_rewards: list[list[float]] = [None] * n_inits  # type: ignore[list-item]
 
-        noise = TemporallyCorrelatedNoise(
-            eta=self._noise_eta, rho=self._noise_rho, n_envs=n_envs, action_dim=2
-        )
+        noise = VelocityProportionalNoise(eta=self._noise_eta, n_envs=n_envs, action_dim=2)
 
         for chunk_idx in range(n_chunks):
             start = chunk_idx * n_envs
@@ -145,6 +143,8 @@ class SodaHierarchicalRunner:
             obs = vector_env_reset(env)
             policy.reset()
             noise.reset()
+            if "agent_pos" in obs:
+                noise.set_initial_pos(obs["agent_pos"])
 
             pbar = tqdm.tqdm(
                 total=self._inner.max_steps,
@@ -171,7 +171,7 @@ class SodaHierarchicalRunner:
                     lambda x: x.detach().to("cpu").numpy(),
                 )
                 action = slice_action_chunk(np_action_dict["action"], 1)
-                action = noise.apply_to_chunk(action, scale_by_magnitude=self._noise_scale)
+                action = noise.apply_to_chunk(action)
 
                 obs, _reward, done, _info = env.step(action)
                 done = bool(np.all(done))

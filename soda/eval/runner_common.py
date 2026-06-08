@@ -16,6 +16,29 @@ from soda.eval.metrics import (
 from soda.eval.run_naming import DEFAULT_TEST_START_SEED
 
 
+def get_action_normalizer_scale(policy: Any) -> np.ndarray | None:
+    """
+    Return per-dim scale factor so that noise with η=1.0 equals 1 normalised
+    action unit (roughly the half-range of the training data).
+
+    For limits-normalised actions, normalizer.scale = 2 / (max - min), so
+    the inverse gives (max - min) / 2 — the pixel-space equivalent of 1
+    normalised unit.  Returns None if the normalizer cannot be found.
+    """
+    for source in [policy, getattr(policy, "low_policy", None)]:
+        if source is None:
+            continue
+        norm = getattr(source, "normalizer", None)
+        if norm is None:
+            continue
+        try:
+            scale_param = norm["action"].params_dict["scale"].detach().cpu().numpy()
+            return (1.0 / scale_param).astype(np.float32)
+        except Exception:
+            continue
+    return None
+
+
 def vector_env_reset(env: Any) -> Any:
     """
     Reset Columbia ``AsyncVectorEnv`` compatibly with gym 0.21–0.26.

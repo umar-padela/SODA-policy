@@ -7,3 +7,6 @@
 [submodule "third_party/bid_diffusion"]
 	path = third_party/bid_diffusion
 	url = https://github.com/YuejiangLIU/bid_diffusion
+[submodule "third_party/bid_lerobot"]
+	path = third_party/bid_lerobot
+	url = https://github.com/Jubayer-Hamid/bid_lerobot

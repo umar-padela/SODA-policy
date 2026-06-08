@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from soda.eval.dp_runner import slice_action_chunk
+from soda.eval.runner_common import slice_action_chunk
 
 
 def test_slice_action_chunk_vectorized():

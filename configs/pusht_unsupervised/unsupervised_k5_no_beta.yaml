@@ -1,14 +1,23 @@
 # ============================================================
 # Experiment: E3 — Push-T unsupervised option discovery (LOVE)
-# Config: k=9 U-Net, no β head training, 500 epochs, constant LR
-# Key difference vs supervised configs: option_id_key = option_id_unsupervised
+# Config: π_low, k=5 U-Net, no β head training, 500 epochs, cosine LR
+#
+# Identical to configs/pusht/exp_k5_no_beta.yaml except:
+#   task.dataset.option_id_key: option_id_unsupervised  (LOVE labels)
+#   train_low.wandb_group: unsupervised_study
+#   train_low.wandb_tags: [unsupervised_study, love, k5]
+#
+# LOVE may produce a different num_options than the supervised baseline (3).
+# num_options: null → inferred from zarr at load time.
+# π_high (unsupervised_high_starts_prev_opt.yaml) can be trained in parallel — uses ImageNet init, not π_low weights.
 # ============================================================
 
-name: unsupervised_k9_no_beta
+name: unsupervised_k5_no_beta
 
+# --- Shared DP layout ---
 n_obs_steps: 2
-n_action_steps: 8
-horizon: null
+n_action_steps: 8              # eval-only; not a training param
+horizon: null                  # auto = longest option segment in zarr
 past_action_visible: false
 obs_as_global_cond: true
 
@@ -27,13 +36,12 @@ task:
     option_id_key: option_id_unsupervised      # <-- LOVE labels (vs option_id_supervised in E1)
     val_ratio: 0.1
     seed: 42
-    min_segment_len: 3
+    min_segment_len: 3         # drop 1- and 2-frame segments; keep ≥ 3
     num_workers: 8
-    anchor_cut_last_n: 0
+    anchor_cut_last_n: 0       # π_low: unused (0 = no cut)
 
-# === WHAT CHANGES ===
 policy:
-  kernel_size: 9
+  kernel_size: 5               # matches exp_k5_no_beta.yaml (E1 kernel sweep baseline)
   crop_shape: [84, 84]
   num_inference_steps: 100
   diffusion_step_embed_dim: 128
@@ -43,13 +51,12 @@ policy:
   eval_fixed_crop: true
   obs_encoder_group_norm: true
 
-# === CONSTANT ACROSS ALL EXPERIMENTS ===
 low_policy:
-  num_options: null
+  num_options: null            # inferred from zarr
   option_embed_dim: 32
-  bottleneck_dim: 2048
-  termination_input: obs
-  termination_stop_grad: true
+  bottleneck_dim: 2048         # must equal policy.down_dims[-1]
+  termination_input: obs       # irrelevant (weight=0); set for completeness
+  termination_stop_grad: true  # redundant with weight=0; belt-and-suspenders
   termination_label_smoothing: 0.05
   imagenet_init: true
   termination_head:
@@ -57,7 +64,7 @@ low_policy:
     hidden_dim: 256
     num_layers: 2
     use_chunk_cursor: false
-    dropout_rate: 0.0        # β MLP not trained in this experiment
+    dropout_rate: 0.0          # β MLP not trained in this experiment
 
 noise_scheduler:
   num_train_timesteps: 100
@@ -69,46 +76,56 @@ noise_scheduler:
   variance_type: fixed_small
 
 train_low:
+  # --- infrastructure ---
   device: cuda:0
   seed: 42
   num_workers: 4
-  output_dir: null
+  output_dir: null             # overridden by modal entrypoint
   wandb_enabled: true
   wandb_project: soda-final-experiments
   wandb_run_name: null
   wandb_group: unsupervised_study
-  wandb_tags: [unsupervised_study, love, k9]
+  wandb_tags: [unsupervised_study, love, k5]
   use_ema: true
   run_readme: null
+
+  # --- schedule: cosine LR (matches exp_k5_no_beta.yaml) ---
   num_epochs: 500
   batch_size: 64
   lr: 1.0e-4
-  lr_warmup_epochs: 5
+  lr_warmup_epochs: 5          # linear ramp 0→lr over first 5 epochs
   lr_schedule_type: cosine     # warmup 5 epochs then cosine decay to 0 over remaining 495
   lr_plateau_patience: null
   lr_plateau_patience_beta: null
   lr_plateau_factor: null
   lr_plateau_min_lr: null
   weight_decay: 1.0e-6
-  checkpoint_every: 50
+  checkpoint_every: 50         # save epoch_NNNN.ckpt every 50 epochs for eval sweep
+
+  # --- termination head: COMPLETELY DISABLED ---
   termination_loss_weight: 0.0
   termination_stop_grad: true
   termination_pos_weight: 1.0
   beta_lr: 1.0e-3
   beta_stratified_batches: false
   mask_diffusion_on_positive: false
-  skip_diffusion_loss: false
+  skip_diffusion_loss: false   # diffusion trains normally
+
+  # --- data ---
   all_anchors: true
-  option_balance: none
+  option_balance: none         # no inverse-freq weighting on diffusion loss
   best_checkpoint_metric: loss_diffusion
+
+  # --- warmstart ---
   finetune_dp_checkpoint: null
   warmstart_unet: null
   checkpoint: null
 
+# --- Hierarchical eval (not used during training; high_checkpoint set at eval time) ---
 inference:
   beta_transition: 0.9
   beta_diffusion_t: 0
-  high_checkpoint: /experiments/final_experiments/pusht/high_study/high_starts_prev_opt/best.ckpt
+  high_checkpoint: null        # set at eval time to unsupervised high policy checkpoint
   low_checkpoint: null
 
 eval:

@@ -239,6 +239,7 @@ experiments/final_experiments/**/*.pt
 experiments/final_experiments/**/*.mp4
 data/raw/square/
 pushT_options_labeled/
+poster/
 
 # IDE and Assistant configs
 .cursor/
