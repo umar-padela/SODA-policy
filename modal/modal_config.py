@@ -1658,3 +1658,33 @@ def analyze_high_images(
     print(f"  correct/ — {n_saved - n_wrong} images")
     print(f"  wrong/   — {n_wrong} images")
     return {"output_dir": str(out_dir), "n_saved": n_saved, "n_wrong": n_wrong}
+
+
+@app.function(
+    image=image,
+    gpu="T4",
+    timeout=14400,
+    volumes={EXPERIMENTS_MOUNT: volume},
+    secrets=[_wandb_secret],
+)
+def train_love() -> None:
+    """Remote wrapper around the LOVE adapter trainer (E3 unsupervised, Push-T).
+
+    Writes the best checkpoint and the action k-means centroids to the
+    persistent volume under /experiments/love_pusht/.
+    """
+    out_dir = Path(EXPERIMENTS_MOUNT) / "love_pusht"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    env = os.environ.copy()
+    env["SODA_LOVE_CKPT_DIR"] = str(out_dir)
+    subprocess.run(
+        [
+            "python",
+            "-m",
+            "soda.option_discovery.unsupervised.love_adapter.train",
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        check=True,
+    )
+    volume.commit()
