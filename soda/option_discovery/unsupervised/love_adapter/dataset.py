@@ -33,8 +33,18 @@ def _read_arrays(zarr_path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     return state, action, episode_ends
 
 
+def _normalize(state: np.ndarray, mean: np.ndarray, std: np.ndarray) -> np.ndarray:
+    return ((state - mean) / std).astype(np.float32)
+
+
 class PushtLoveDataset(Dataset):
-    """Sliding fixed-length windows over Push-T episodes, with quantized actions."""
+    """Sliding fixed-length windows over Push-T episodes, with quantized actions.
+
+    Per-dim z-score normalizes state because Push-T xy lives in [0, 512]
+    (pixel space) and the LOVE recurrent layers NaN out on raw inputs.
+    Mean/std are exposed for persistence in the checkpoint so labeling
+    applies the same standardization.
+    """
 
     def __init__(
         self,
@@ -44,12 +54,20 @@ class PushtLoveDataset(Dataset):
         stride: int | None = None,
         action_centroids: np.ndarray | None = None,
         kmeans_seed: int = 0,
+        state_mean: np.ndarray | None = None,
+        state_std: np.ndarray | None = None,
     ):
         self.window_len = window_len
         self.stride = stride or max(1, window_len // 2)
 
         state, action, episode_ends = _read_arrays(zarr_path)
-        self.state = state
+        if state_mean is None or state_std is None:
+            self.state_mean = state.mean(axis=0).astype(np.float32)
+            self.state_std = np.maximum(state.std(axis=0), 1e-3).astype(np.float32)
+        else:
+            self.state_mean = state_mean.astype(np.float32)
+            self.state_std = np.maximum(state_std, 1e-3).astype(np.float32)
+        self.state = _normalize(state, self.state_mean, self.state_std)
         self.action_continuous = action
 
         if action_centroids is None:
@@ -85,9 +103,13 @@ class PushtFullEpisodeDataset(Dataset):
         self,
         zarr_path: Path,
         action_centroids: np.ndarray,
+        state_mean: np.ndarray,
+        state_std: np.ndarray,
     ):
         state, action, episode_ends = _read_arrays(zarr_path)
-        self.state = state
+        self.state_mean = state_mean.astype(np.float32)
+        self.state_std = np.maximum(state_std, 1e-3).astype(np.float32)
+        self.state = _normalize(state, self.state_mean, self.state_std)
         self.action_centroids = action_centroids.astype(np.float32)
         self.action_ids = quantize(action, self.action_centroids)
         starts = np.concatenate([[0], episode_ends[:-1]])

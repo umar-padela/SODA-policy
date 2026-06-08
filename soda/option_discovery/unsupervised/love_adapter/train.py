@@ -146,7 +146,11 @@ def train(cfg: LoveConfig) -> Path:
     best_path = cfg.ckpt_dir / "best.ckpt"
 
     centroids = ds.action_centroids
+    state_mean = ds.state_mean
+    state_std = ds.state_std
     np.save(cfg.ckpt_dir / "action_centroids.npy", centroids)
+    np.save(cfg.ckpt_dir / "state_mean.npy", state_mean)
+    np.save(cfg.ckpt_dir / "state_std.npy", state_std)
     (cfg.ckpt_dir / "config.json").write_text(
         json.dumps({k: str(v) for k, v in cfg.__dict__.items()}, indent=2)
     )
@@ -189,6 +193,8 @@ def train(cfg: LoveConfig) -> Path:
                             "model": model.state_dict(),
                             "cfg": {k: (str(v) if isinstance(v, Path) else v) for k, v in cfg.__dict__.items()},
                             "action_centroids": centroids,
+                            "state_mean": state_mean,
+                            "state_std": state_std,
                             "iter": b_idx,
                             "val_loss": val,
                         },

@@ -58,7 +58,9 @@ def load_model(ckpt_path: Path, device: torch.device):
     model.load_state_dict(blob["model"])
     model.eval()
     centroids = np.asarray(blob["action_centroids"], dtype=np.float32)
-    return model, cfg, centroids
+    state_mean = np.asarray(blob["state_mean"], dtype=np.float32)
+    state_std = np.asarray(blob["state_std"], dtype=np.float32)
+    return model, cfg, centroids, state_mean, state_std
 
 
 @torch.no_grad()
@@ -154,9 +156,14 @@ def main(argv: list[str] | None = None) -> int:
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"loading {args.ckpt} on {device}")
-    model, cfg, centroids = load_model(args.ckpt, device)
+    model, cfg, centroids, state_mean, state_std = load_model(args.ckpt, device)
 
-    ds = PushtFullEpisodeDataset(args.zarr, action_centroids=centroids)
+    ds = PushtFullEpisodeDataset(
+        args.zarr,
+        action_centroids=centroids,
+        state_mean=state_mean,
+        state_std=state_std,
+    )
     total = ds.spans[-1][1]
     labels = np.zeros(total, dtype=np.int32)
     print(f"labeling {len(ds)} episodes ({total} frames total)")
