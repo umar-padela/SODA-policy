@@ -13,6 +13,7 @@ Outputs (under `experiments/love_pusht/`):
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -109,6 +110,14 @@ def _eval(model, dl: DataLoader, cfg: LoveConfig, device: torch.device) -> float
 
 
 def train(cfg: LoveConfig) -> Path:
+    # Modal entry can override ckpt_dir to point at the soda-experiments volume
+    # (`/experiments/love_pusht/`). Without this the ckpt lands inside the
+    # container's ephemeral filesystem and is lost on shutdown.
+    env_ckpt_dir = os.environ.get("SODA_LOVE_CKPT_DIR")
+    if env_ckpt_dir:
+        cfg.ckpt_dir = Path(env_ckpt_dir)
+        print(f"ckpt_dir overridden via SODA_LOVE_CKPT_DIR: {cfg.ckpt_dir}")
+
     torch.manual_seed(cfg.seed)
     np.random.seed(cfg.seed)
     if torch.cuda.is_available():
