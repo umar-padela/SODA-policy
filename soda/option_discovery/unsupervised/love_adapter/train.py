@@ -13,6 +13,7 @@ Outputs (under `experiments/love_pusht/`):
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -109,6 +110,14 @@ def _eval(model, dl: DataLoader, cfg: LoveConfig, device: torch.device) -> float
 
 
 def train(cfg: LoveConfig) -> Path:
+    # Modal entry can override ckpt_dir to point at the soda-experiments volume
+    # (`/experiments/love_pusht/`). Without this the ckpt lands inside the
+    # container's ephemeral filesystem and is lost on shutdown.
+    env_ckpt_dir = os.environ.get("SODA_LOVE_CKPT_DIR")
+    if env_ckpt_dir:
+        cfg.ckpt_dir = Path(env_ckpt_dir)
+        print(f"ckpt_dir overridden via SODA_LOVE_CKPT_DIR: {cfg.ckpt_dir}")
+
     torch.manual_seed(cfg.seed)
     np.random.seed(cfg.seed)
     if torch.cuda.is_available():
@@ -146,7 +155,11 @@ def train(cfg: LoveConfig) -> Path:
     best_path = cfg.ckpt_dir / "best.ckpt"
 
     centroids = ds.action_centroids
+    state_mean = ds.state_mean
+    state_std = ds.state_std
     np.save(cfg.ckpt_dir / "action_centroids.npy", centroids)
+    np.save(cfg.ckpt_dir / "state_mean.npy", state_mean)
+    np.save(cfg.ckpt_dir / "state_std.npy", state_std)
     (cfg.ckpt_dir / "config.json").write_text(
         json.dumps({k: str(v) for k, v in cfg.__dict__.items()}, indent=2)
     )
@@ -189,6 +202,8 @@ def train(cfg: LoveConfig) -> Path:
                             "model": model.state_dict(),
                             "cfg": {k: (str(v) if isinstance(v, Path) else v) for k, v in cfg.__dict__.items()},
                             "action_centroids": centroids,
+                            "state_mean": state_mean,
+                            "state_std": state_std,
                             "iter": b_idx,
                             "val_loss": val,
                         },

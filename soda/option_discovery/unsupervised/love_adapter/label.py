@@ -58,7 +58,9 @@ def load_model(ckpt_path: Path, device: torch.device):
     model.load_state_dict(blob["model"])
     model.eval()
     centroids = np.asarray(blob["action_centroids"], dtype=np.float32)
-    return model, cfg, centroids
+    state_mean = np.asarray(blob["state_mean"], dtype=np.float32)
+    state_std = np.asarray(blob["state_std"], dtype=np.float32)
+    return model, cfg, centroids, state_mean, state_std
 
 
 @torch.no_grad()
@@ -150,13 +152,29 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--ckpt", type=Path, required=True)
     p.add_argument("--zarr", type=Path, default=LoveConfig().zarr_path)
     p.add_argument("--min-marginal", type=float, default=LoveConfig().min_marginal)
+    p.add_argument(
+        "--output-npy",
+        type=Path,
+        default=None,
+        help=(
+            "If set, write the labels array to this .npy and SKIP the zarr "
+            "write. Use this when labeling on Modal (the zarr is read-only in "
+            "the image); pull the .npy locally and apply with "
+            "scripts/apply_love_labels.py."
+        ),
+    )
     args = p.parse_args(argv)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"loading {args.ckpt} on {device}")
-    model, cfg, centroids = load_model(args.ckpt, device)
+    model, cfg, centroids, state_mean, state_std = load_model(args.ckpt, device)
 
-    ds = PushtFullEpisodeDataset(args.zarr, action_centroids=centroids)
+    ds = PushtFullEpisodeDataset(
+        args.zarr,
+        action_centroids=centroids,
+        state_mean=state_mean,
+        state_std=state_std,
+    )
     total = ds.spans[-1][1]
     labels = np.zeros(total, dtype=np.int32)
     print(f"labeling {len(ds)} episodes ({total} frames total)")
@@ -180,8 +198,16 @@ def main(argv: list[str] | None = None) -> int:
     for u, c in zip(unique, counts):
         print(f"  {u}: {c}  ({c / counts.sum():.3%})")
 
-    write_labels(args.zarr, labels)
-    print(f"K_final={k_final} — update num_options in configs/pusht/soda_unsupervised.yaml")
+    if args.output_npy is not None:
+        args.output_npy.parent.mkdir(parents=True, exist_ok=True)
+        np.save(args.output_npy, labels)
+        print(f"wrote {args.output_npy}  (shape={labels.shape}, dtype={labels.dtype})")
+    else:
+        write_labels(args.zarr, labels)
+    print(
+        f"K_final={k_final} — update num_options in "
+        "configs/pusht_unsupervised/*.yaml (or leave null to infer at load)"
+    )
     return 0
 
 

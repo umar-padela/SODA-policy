@@ -1688,3 +1688,40 @@ def train_love() -> None:
         check=True,
     )
     volume.commit()
+
+
+@app.function(
+    image=image,
+    gpu="T4",
+    timeout=3600,
+    volumes={EXPERIMENTS_MOUNT: volume},
+)
+def label_love() -> None:
+    """Run the trained LOVE checkpoint over pusht.zarr; write labels.npy to volume.
+
+    Reads ckpt from /experiments/love_pusht/best.ckpt; reads zarr from the
+    read-only image; writes labels to
+    /experiments/love_pusht/option_id_unsupervised.npy.
+
+    Pull locally with:
+        modal volume get soda-experiments love_pusht/option_id_unsupervised.npy ./experiments/love_pusht/
+    Then apply via:
+        python scripts/apply_love_labels.py
+    """
+    out_dir = Path(EXPERIMENTS_MOUNT) / "love_pusht"
+    ckpt = out_dir / "best.ckpt"
+    npy_out = out_dir / "option_id_unsupervised.npy"
+    subprocess.run(
+        [
+            "python",
+            "-m",
+            "soda.option_discovery.unsupervised.love_adapter.label",
+            "--ckpt",
+            str(ckpt),
+            "--output-npy",
+            str(npy_out),
+        ],
+        cwd=REPO_ROOT,
+        check=True,
+    )
+    volume.commit()

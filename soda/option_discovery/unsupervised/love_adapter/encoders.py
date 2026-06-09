@@ -21,6 +21,9 @@ class StateEncoder(nn.Module):
 
     def __init__(self, state_size: int = 5, output_dim: int = 128, feat_size: int = 128):
         super().__init__()
+        # hssm_rl.py:54 reads `.embedding_size` off the obs encoder to size the
+        # combine_action_obs Linear; must match the output channel of forward().
+        self.embedding_size = output_dim
         self.net = nn.Sequential(
             nn.Linear(state_size, feat_size),
             nn.ReLU(),
